@@ -295,10 +295,14 @@ def keys_list():
     "--type", "bet_type",
     type=click.Choice(["win", "place", "show"]), default="win",
 )
-def play(game: str, stake: float, horse: int, bet_type: str):
+@click.option("--render/--no-render", default=True, help="Render terminal animation/reveal when available")
+def play(game: str, stake: float, horse: int, bet_type: str, render: bool):
     """Play a game and wager $V."""
     async def _play():
         from openvegas.client import OpenVegasClient, APIError
+        from openvegas.games.base import GameResult
+        from openvegas.games.horse_racing import HorseRacing
+        from openvegas.games.skill_shot import SkillShotGame
 
         if game == "horse" and horse is None:
             console.print("[red]Horse racing requires --horse <number>.[/red]")
@@ -314,19 +318,44 @@ def play(game: str, stake: float, horse: int, bet_type: str):
             net = Decimal(str(result.get("net", "0")))
             payout = Decimal(str(result.get("payout", "0")))
             bet_amount = Decimal(str(result.get("bet_amount", stake)))
+            game_id = str(result.get("game_id", ""))
+            rendered = False
 
-            # Display result
-            if net > 0:
-                console.print(
-                    f"[bold green]Won {payout} $V! "
-                    f"(+{net} net)[/bold green]"
-                )
-            else:
-                console.print(f"[red]Lost {bet_amount} $V.[/red]")
+            if render:
+                renderer_cls = {
+                    "horse": HorseRacing,
+                    "skillshot": SkillShotGame,
+                }.get(game)
+                if renderer_cls:
+                    gr = GameResult(
+                        game_id=game_id,
+                        player_id="",
+                        bet_amount=bet_amount,
+                        payout=payout,
+                        net=net,
+                        outcome_data=result.get("outcome_data", {}) or {},
+                        server_seed="",
+                        server_seed_hash=str(result.get("server_seed_hash", "")),
+                        client_seed="",
+                        nonce=0,
+                        provably_fair=bool(result.get("provably_fair", True)),
+                    )
+                    await renderer_cls().render(gr, console)
+                    rendered = True
+
+            if not rendered:
+                # Fallback text-only result
+                if net > 0:
+                    console.print(
+                        f"[bold green]Won {payout} $V! "
+                        f"(+{net} net)[/bold green]"
+                    )
+                else:
+                    console.print(f"[red]Lost {bet_amount} $V.[/red]")
 
             if result.get("provably_fair"):
                 console.print(
-                    f"[dim]Verify: openvegas verify {result.get('game_id', '')}[/dim]"
+                    f"[dim]Verify: openvegas verify {game_id}[/dim]"
                 )
 
         except APIError as e:
