@@ -1,0 +1,70 @@
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local tool state
+.history/
+.claude/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Python virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime DB artifacts (local only)
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Remotion
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+.next/
+.cache/
+
+# Remotion rendered outputs
+my-video/out/
+
+# Supabase local CLI state (keep migrations + seed.sql committed)
+supabase/.temp/
+supabase/.branches/
+supabase/.cache/
+supabase/.functions/
+
