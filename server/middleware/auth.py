@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 
+import httpx
 from fastapi import Depends, HTTPException, Request
 from jose import jwt, JWTError
 
@@ -13,31 +14,87 @@ def _supabase_jwt_secret() -> str:
     return os.environ.get("SUPABASE_JWT_SECRET", "").strip()
 
 
+def _supabase_url() -> str:
+    return os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+
+
+def _supabase_anon_key() -> str:
+    return os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+
+async def _validate_with_supabase(token: str) -> dict:
+    """Fallback validation for modern Supabase JWT signing (e.g. ES256)."""
+    url = _supabase_url()
+    anon = _supabase_anon_key()
+    if not url or not anon:
+        raise HTTPException(
+            500,
+            "Supabase token validation is not configured (SUPABASE_URL/SUPABASE_ANON_KEY).",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{url}/auth/v1/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": anon,
+                },
+            )
+    except Exception:
+        raise HTTPException(503, "Unable to reach Supabase Auth for token validation")
+
+    if resp.status_code != 200:
+        raise HTTPException(401, "Invalid or expired token")
+
+    payload = resp.json()
+    user_id = payload.get("id")
+    if not user_id:
+        raise HTTPException(401, "Invalid or expired token")
+
+    return {
+        "user_id": user_id,
+        "role": payload.get("role", "authenticated"),
+        "account_type": "human",
+    }
+
+
 async def get_current_user(request: Request) -> dict:
     """Extract and verify Supabase JWT from Authorization header."""
-    secret = _supabase_jwt_secret()
-    if not secret:
-        raise HTTPException(500, "SUPABASE_JWT_SECRET is not configured")
-
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(401, "Missing bearer token")
 
     token = auth.removeprefix("Bearer ")
+    alg = ""
     try:
-        payload = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
-        return {
-            "user_id": payload["sub"],
-            "role": payload.get("role", "authenticated"),
-            "account_type": "human",
-        }
+        header = jwt.get_unverified_header(token)
+        alg = str(header.get("alg", ""))
     except JWTError:
-        raise HTTPException(401, "Invalid or expired token")
+        pass
+
+    # Legacy HS256 projects can verify locally with shared secret.
+    if alg == "HS256":
+        secret = _supabase_jwt_secret()
+        if secret:
+            try:
+                payload = jwt.decode(
+                    token,
+                    secret,
+                    algorithms=["HS256"],
+                    audience="authenticated",
+                )
+                return {
+                    "user_id": payload["sub"],
+                    "role": payload.get("role", "authenticated"),
+                    "account_type": "human",
+                }
+            except JWTError:
+                # Secret mismatch/rotation fallback.
+                pass
+
+    # Modern Supabase projects often use asymmetric signing (e.g. ES256).
+    return await _validate_with_supabase(token)
 
 
 async def get_current_agent(request: Request) -> dict:
