@@ -42,9 +42,13 @@ class DemoPlayRequest(BaseModel):
 def _is_demo_admin(user_id: str) -> bool:
     if os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0") != "1":
         return False
+    raw = os.getenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "").strip()
+    # Local-testing convenience: if enabled and list is empty, allow current user.
+    if not raw:
+        return True
     allow = {
         x.strip()
-        for x in os.getenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "").split(",")
+        for x in raw.split(",")
         if x.strip()
     }
     return user_id in allow

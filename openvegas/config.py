@@ -1,11 +1,14 @@
 """Local config management (~/.openvegas/)."""
 
 import json
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
+DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", "http://127.0.0.1:8000")
 
 DEFAULT_CONFIG = {
     "session": {},
@@ -18,7 +21,7 @@ DEFAULT_CONFIG = {
     },
     "theme": "default",
     "animation": True,
-    "backend_url": "https://api.openvegas.gg",
+    "backend_url": DEFAULT_BACKEND_URL,
     "supabase_url": "",
     "supabase_anon_key": "",
 }
@@ -33,6 +36,9 @@ def load_config() -> dict:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             stored = json.loads(f.read())
+        # Smooth local migration: old production default -> current local default.
+        if stored.get("backend_url") == LEGACY_DEFAULT_BACKEND_URL:
+            stored["backend_url"] = DEFAULT_BACKEND_URL
         # Merge with defaults for any missing keys
         merged = {**DEFAULT_CONFIG, **stored}
         return merged
@@ -95,4 +101,4 @@ def get_bearer_token() -> str | None:
 
 def get_backend_url() -> str:
     config = load_config()
-    return config.get("backend_url", "https://api.openvegas.gg")
+    return config.get("backend_url", DEFAULT_BACKEND_URL)

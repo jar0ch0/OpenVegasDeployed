@@ -58,7 +58,10 @@ def login(otp: bool):
         password = Prompt.ask("Password", password=True)
         try:
             result = auth.login_with_email(email, password)
-            console.print(f"[green]Logged in as {result['email']}[/green]")
+            console.print(
+                f"[green]Logged in as {result['email']}[/green]\n"
+                f"[dim]user_id: {result.get('user_id', '')}[/dim]"
+            )
         except Exception as e:
             console.print(f"[red]Login failed: {e}[/red]")
 
@@ -79,7 +82,10 @@ def signup():
 
     try:
         result = auth.signup(email, password)
-        console.print(f"[green]Account created for {result['email']}[/green]")
+        console.print(
+            f"[green]Account created for {result['email']}[/green]\n"
+            f"[dim]user_id: {result.get('user_id', '')}[/dim]"
+        )
     except Exception as e:
         console.print(f"[red]Signup failed: {e}[/red]")
 
