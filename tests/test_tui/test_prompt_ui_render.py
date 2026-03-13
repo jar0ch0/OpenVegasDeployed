@@ -207,6 +207,68 @@ async def test_run_once_horse_uses_quote_play_payload(monkeypatch):
     assert ui.client.calls[0]["horse"] == 1
 
 
+def test_run_uses_shared_result_renderer_for_win(monkeypatch):
+    ui = InlinePromptUI(client=_FakeClientPlay(), console=Console(record=True))
+    calls: dict = {"n": 0, "is_win": None, "content": None}
+
+    async def _ok_auth():
+        return True
+
+    async def _fake_run_once():
+        ui._last_is_win = True
+        return "win result"
+
+    monkeypatch.setattr(ui, "_ensure_auth", _ok_auth)
+    monkeypatch.setattr(ui, "_run_step", lambda *_args, **_kwargs: "confirm")
+    monkeypatch.setattr(ui, "run_once", _fake_run_once)
+    monkeypatch.setattr("openvegas.tui.prompt_ui.Confirm.ask", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": True})
+
+    def _fake_render_result(console, content, *, is_win, animation_enabled, title):
+        calls["n"] += 1
+        calls["is_win"] = is_win
+        calls["content"] = content
+        _ = (console, animation_enabled, title)
+
+    monkeypatch.setattr("openvegas.tui.prompt_ui.render_result_panel", _fake_render_result)
+
+    ui.run()
+
+    assert calls["n"] == 1
+    assert calls["is_win"] is True
+    assert calls["content"] == "win result"
+
+
+def test_run_uses_shared_result_renderer_for_non_win(monkeypatch):
+    ui = InlinePromptUI(client=_FakeClientPlay(), console=Console(record=True))
+    calls: dict = {"n": 0, "is_win": None}
+
+    async def _ok_auth():
+        return True
+
+    async def _fake_run_once():
+        ui._last_is_win = False
+        return "non win result"
+
+    monkeypatch.setattr(ui, "_ensure_auth", _ok_auth)
+    monkeypatch.setattr(ui, "_run_step", lambda *_args, **_kwargs: "confirm")
+    monkeypatch.setattr(ui, "run_once", _fake_run_once)
+    monkeypatch.setattr("openvegas.tui.prompt_ui.Confirm.ask", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": True})
+
+    def _fake_render_result(_console, _content, *, is_win, animation_enabled, title):
+        calls["n"] += 1
+        calls["is_win"] = is_win
+        _ = (animation_enabled, title)
+
+    monkeypatch.setattr("openvegas.tui.prompt_ui.render_result_panel", _fake_render_result)
+
+    ui.run()
+
+    assert calls["n"] == 1
+    assert calls["is_win"] is False
+
+
 def _dummy_result():
     from decimal import Decimal
     from openvegas.games.base import GameResult

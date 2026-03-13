@@ -12,7 +12,8 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from openvegas import __version__
-from openvegas.tui.confetti import render_confetti
+from openvegas.config import load_config
+from openvegas.tui.confetti import render_result_panel
 from openvegas.tui.hints import verify_hint_for_result
 
 console = Console()
@@ -463,7 +464,6 @@ def play(
             payout = Decimal(str(result.get("payout", "0")))
             bet_amount = Decimal(str(result.get("bet_amount", stake)))
             game_id = str(result.get("game_id", ""))
-            rendered = False
 
             if render:
                 renderer_cls = {
@@ -485,30 +485,28 @@ def play(
                         provably_fair=bool(result.get("provably_fair", True)),
                     )
                     await renderer_cls().render(gr, console)
-                    rendered = True
 
-            if not rendered:
-                # Fallback text-only result
-                if net > 0:
-                    console.print(
-                        f"[bold green]Won {payout} $V! "
-                        f"(+{net} net)[/bold green]"
-                    )
-                else:
-                    console.print(f"[red]Lost {bet_amount} $V.[/red]")
-
+            result_lines: list[str] = []
             if net > 0:
-                from openvegas.config import load_config
-                if load_config().get("animation", True):
-                    render_confetti(console)
+                result_lines.append(f"[bold green]Won {payout} $V! (+{net} net)[/bold green]")
+            else:
+                result_lines.append(f"[red]Lost {bet_amount} $V.[/red]")
 
             if result.get("demo_mode"):
-                console.print("[bold yellow]DEMO MODE RESULT[/bold yellow] [dim](canonical: false)[/dim]")
+                result_lines.append("[bold yellow]DEMO MODE RESULT[/bold yellow] [dim](canonical: false)[/dim]")
 
-            if result.get("provably_fair"):
-                console.print(f"[dim]Verify: {verify_hint_for_result(game_id, False)}[/dim]")
-            elif result.get("demo_mode"):
-                console.print(f"[dim]Verify (demo): {verify_hint_for_result(game_id, True)}[/dim]")
+            if result.get("demo_mode"):
+                result_lines.append(f"[dim]Verify (demo): {verify_hint_for_result(game_id, True)}[/dim]")
+            elif result.get("provably_fair"):
+                result_lines.append(f"[dim]Verify: {verify_hint_for_result(game_id, False)}[/dim]")
+
+            render_result_panel(
+                console,
+                "\n".join(result_lines),
+                is_win=net > 0,
+                animation_enabled=bool(load_config().get("animation", True)),
+                title="Result",
+            )
 
         except APIError as e:
             detail = str(e.detail)

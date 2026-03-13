@@ -21,7 +21,7 @@ from openvegas.tui.cards import render_hand
 from openvegas.games.base import GameResult
 from openvegas.games.horse_racing import HorseRacing
 from openvegas.games.skill_shot import SkillShotGame
-from openvegas.tui.confetti import render_confetti
+from openvegas.tui.confetti import render_result_panel
 from openvegas.tui.hints import verify_hint_for_result
 from openvegas.tui.roulette_renderer import render_result as render_roulette_result
 from openvegas.tui.slots_renderer import render_reels as render_slots_reels
@@ -144,6 +144,7 @@ class InlinePromptUI:
             no_render=False,
             timeout_sec=15.0,
         )
+        self._last_is_win = False
 
     def _clear_horse_quote_state(self) -> None:
         self.state.horse_quote_id = ""
@@ -523,6 +524,7 @@ class InlinePromptUI:
             outcome = demo.get("outcome", {})
             payout = Decimal(str(demo.get("payout_v", "0")))
             net = Decimal(str(demo.get("net_v", "0")))
+            self._last_is_win = net > 0
             visual = self._render_card_outcome(self.state.game, outcome, stake, payout)
             return (
                 f"{visual}\n"
@@ -561,9 +563,8 @@ class InlinePromptUI:
                 outcome = resolved.get("outcome", {})
                 payout = Decimal(str(resolved.get("payout_v", "0")))
                 net = Decimal(str(resolved.get("net_v", "0")))
+                self._last_is_win = net > 0
                 visual = self._render_card_outcome(self.state.game, outcome, stake, payout)
-                if net > 0 and load_config().get("animation", True):
-                    render_confetti(self.console)
                 return (
                     f"{visual}\n"
                     f"LIVE MODE\n"
@@ -608,6 +609,7 @@ class InlinePromptUI:
 
     async def _run_action(self) -> str:
         action = self.state.action
+        self._last_is_win = False
 
         if action == "Balance":
             data = await self.client.get_balance()
@@ -687,8 +689,8 @@ class InlinePromptUI:
                 except Exception:
                     render_note = "Render skipped\nShowing result summary only\n"
 
-            if Decimal(str(data.get("net", "0"))) > 0 and load_config().get("animation", True):
-                render_confetti(self.console)
+            if Decimal(str(data.get("net", "0"))) > 0:
+                self._last_is_win = True
 
             mode = "DEMO MODE (canonical: false)" if data.get("demo_mode") else "LIVE MODE"
             return (
@@ -715,6 +717,7 @@ class InlinePromptUI:
         return f"Unknown action: {action}"
 
     async def run_once(self) -> str:
+        self._last_is_win = False
         err = validate_inputs(self.state)
         if err:
             return err
@@ -753,7 +756,13 @@ class InlinePromptUI:
                     step_index += 1
 
                 message = asyncio.run(self.run_once())
-                self.console.print(Panel(message, title="Result"))
+                render_result_panel(
+                    self.console,
+                    message,
+                    is_win=self._last_is_win,
+                    animation_enabled=load_config().get("animation", True),
+                    title="Result",
+                )
                 if not Confirm.ask("Run another action?", default=True):
                     return
             except (KeyboardInterrupt, EOFError):
