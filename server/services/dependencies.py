@@ -6,6 +6,7 @@ Provides runtime DB/Redis initialization and feature-aware schema checks.
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -122,6 +123,7 @@ class FeatureFlags:
 
 _db: Any = _Placeholder()
 _redis: Any = _Placeholder()
+_log = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -299,7 +301,12 @@ async def init_runtime_deps() -> None:
     else:
         _redis = _Placeholder()
 
-    await assert_schema_compatible(_db, current_flags())
+    flags = current_flags()
+    await assert_schema_compatible(_db, flags)
+    if flags.human_casino_enabled:
+        _log.info("human_casino=enabled schema_ready=true")
+    else:
+        _log.info("human_casino=disabled")
 
 
 async def close_runtime_deps() -> None:

@@ -25,6 +25,9 @@ pip install -e .
 openvegas --help
 openvegas --version
 openvegas ui
+openvegas ui --no-render
+openvegas ui --render-timeout-sec 10
+openvegas ui --full
 ```
 
 ## Authentication
@@ -79,6 +82,27 @@ Examples:
 openvegas play horse --stake 5 --horse 2 --type win
 openvegas play skillshot --stake 5
 openvegas play horse --stake 1 --horse 1 --type win --demo-force-win
+```
+
+## UI mode
+
+```bash
+# default inline guided flow (non-fullscreen)
+openvegas ui
+
+# skip animation rendering
+openvegas ui --no-render
+
+# custom render timeout (seconds)
+openvegas ui --render-timeout-sec 12
+
+# legacy full-screen Textual mode
+openvegas ui --full
+
+# inline UI supports:
+# - Balance / History / Deposit / Verify
+# - Play horse/skillshot + card games (blackjack/roulette/slots/poker/baccarat)
+# - Play (Demo Win) for demo-admin-enabled accounts
 ```
 
 ## Inference spend

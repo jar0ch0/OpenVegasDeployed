@@ -77,15 +77,30 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
+    flags = current_flags()
+    human_casino_enabled = bool(flags.human_casino_enabled)
+    human_casino_schema_ready = bool(flags.human_casino_enabled)
+
     if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
         await assert_db_ready()
-        await assert_schema_compatible(get_db(), current_flags())
-        return {"status": "ready", "mode": "test", "redis": "skipped"}
+        await assert_schema_compatible(get_db(), flags)
+        return {
+            "status": "ready",
+            "mode": "test",
+            "redis": "skipped",
+            "human_casino_enabled": human_casino_enabled,
+            "human_casino_schema_ready": human_casino_schema_ready,
+        }
 
     await assert_db_ready()
     await assert_redis_ready()
-    await assert_schema_compatible(get_db(), current_flags())
-    return {"status": "ready", "mode": "runtime"}
+    await assert_schema_compatible(get_db(), flags)
+    return {
+        "status": "ready",
+        "mode": "runtime",
+        "human_casino_enabled": human_casino_enabled,
+        "human_casino_schema_ready": human_casino_schema_ready,
+    }
 
 
 @app.get("/ui")

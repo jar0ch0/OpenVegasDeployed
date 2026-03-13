@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from decimal import Decimal
@@ -15,7 +16,31 @@ from server.middleware.auth import get_current_user
 from server.services.dependencies import get_human_casino_service
 from server.services.demo_admin import is_demo_admin_user
 
-router = APIRouter(prefix="/casino/human")
+try:  # pragma: no cover - import guard for runtime environments without asyncpg
+    from asyncpg.exceptions import UndefinedTableError
+except Exception:  # pragma: no cover
+    class UndefinedTableError(Exception):
+        pass
+
+
+_log = logging.getLogger(__name__)
+
+
+HUMAN_CASINO_UNAVAILABLE_DETAIL = (
+    "Human casino is unavailable. Ensure CASINO_HUMAN_ENABLED=1 and apply "
+    "016_human_casino."
+)
+
+
+def _require_human_casino_enabled() -> None:
+    if os.getenv("CASINO_HUMAN_ENABLED", "0") != "1":
+        raise HTTPException(status_code=503, detail=HUMAN_CASINO_UNAVAILABLE_DETAIL)
+
+
+router = APIRouter(
+    prefix="/casino/human",
+    dependencies=[Depends(_require_human_casino_enabled)],
+)
 
 
 class StartSessionRequest(BaseModel):
@@ -69,6 +94,12 @@ def _map_value_error(e: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=msg)
 
 
+def _map_schema_not_ready(e: Exception) -> HTTPException:
+    _ = e
+    _log.exception("Human casino schema drift detected")
+    return HTTPException(status_code=503, detail=HUMAN_CASINO_UNAVAILABLE_DETAIL)
+
+
 @router.post("/sessions/start")
 async def start_session(req: StartSessionRequest, user: dict = Depends(get_current_user)):
     svc = get_human_casino_service()
@@ -82,12 +113,17 @@ async def start_session(req: StartSessionRequest, user: dict = Depends(get_curre
         return _json_response(resp.status_code, resp.body_text)
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.get("/games")
 async def list_games(user: dict = Depends(get_current_user)):
     _ = user
-    return await get_human_casino_service().list_games()
+    try:
+        return await get_human_casino_service().list_games()
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.post("/rounds/start")
@@ -106,6 +142,8 @@ async def start_round(req: StartRoundRequest, user: dict = Depends(get_current_u
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.post("/rounds/{round_id}/action")
@@ -122,6 +160,8 @@ async def action_round(round_id: str, req: ActionRequest, user: dict = Depends(g
         return _json_response(resp.status_code, resp.body_text)
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.post("/rounds/{round_id}/resolve")
@@ -136,6 +176,8 @@ async def resolve_round(round_id: str, req: ResolveRequest, user: dict = Depends
         return _json_response(resp.status_code, resp.body_text)
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.get("/rounds/{round_id}/verify")
@@ -144,6 +186,8 @@ async def verify_round(round_id: str, user: dict = Depends(get_current_user)):
         return await get_human_casino_service().verify_round(user_id=user["user_id"], round_id=round_id)
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.get("/sessions/{session_id}")
@@ -152,6 +196,8 @@ async def get_session(session_id: str, user: dict = Depends(get_current_user)):
         return await get_human_casino_service().get_session(user_id=user["user_id"], session_id=session_id)
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
 
 
 @router.post("/rounds/demo-autoplay")
@@ -172,3 +218,5 @@ async def demo_autoplay(req: DemoAutoplayRequest, user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise _map_value_error(e)
+    except UndefinedTableError as e:
+        raise _map_schema_not_ready(e)
