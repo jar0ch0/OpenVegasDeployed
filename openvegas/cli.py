@@ -337,7 +337,7 @@ def keys_list():
 
 @cli.command()
 @click.argument("game", type=click.Choice(["horse", "skillshot"]))
-@click.option("--stake", type=float, required=True, help="Amount of $V to wager")
+@click.option("--stake", type=float, required=True, help="Budget cap for horse ($V) or stake for other games")
 @click.option("--horse", type=int, default=None, help="Horse number (horse racing only)")
 @click.option(
     "--type", "bet_type",
@@ -359,25 +359,106 @@ def play(
 ):
     """Play a game and wager $V."""
     async def _play():
+        import json
+        import uuid
         from openvegas.client import OpenVegasClient, APIError
         from openvegas.games.base import GameResult
         from openvegas.games.horse_racing import HorseRacing
         from openvegas.games.skill_shot import SkillShotGame
 
-        if game == "horse" and horse is None:
-            console.print("[red]Horse racing requires --horse <number>.[/red]")
-            return
-
-        bet = {"amount": stake, "type": bet_type}
-        if horse is not None:
-            bet["horse"] = horse
-
         try:
             client = OpenVegasClient()
-            if demo_force_win:
-                result = await client.play_game_demo(game, bet)
+
+            if game == "horse":
+                if stake <= 0:
+                    console.print("[red]Stake must be greater than 0.[/red]")
+                    return
+
+                quote = await client.create_horse_quote(
+                    bet_type=bet_type,
+                    budget_v=Decimal(str(stake)),
+                    idempotency_key=f"cli-horse-quote-{uuid.uuid4()}",
+                )
+                rows = list(quote.get("horses", []) or [])
+                if not rows:
+                    console.print("[red]No horses returned for quote.[/red]")
+                    return
+
+                table = Table(title=f"Horse Board ({bet_type})")
+                table.add_column("#", justify="right")
+                table.add_column("Horse")
+                table.add_column("Odds", justify="right")
+                table.add_column("Eff Mult", justify="right")
+                table.add_column("Unit Price", justify="right")
+                table.add_column("Max Units", justify="right")
+                table.add_column("Debit", justify="right")
+                table.add_column("Payout If Hit", justify="right")
+                table.add_column("Selectable", justify="right")
+                selectable_choices: list[str] = []
+                for row in rows:
+                    selectable = bool(row.get("selectable", False))
+                    if selectable:
+                        selectable_choices.append(str(row.get("number")))
+                    table.add_row(
+                        str(row.get("number", "")),
+                        str(row.get("name", "")),
+                        str(row.get("odds", "")),
+                        str(row.get("effective_multiplier", "")),
+                        str(row.get("unit_price_v", "")),
+                        str(row.get("max_units", "")),
+                        str(row.get("debit_v", "")),
+                        str(row.get("payout_if_hit_v", "")),
+                        "[green]yes[/green]" if selectable else "[red]no[/red]",
+                    )
+                console.print(table)
+
+                if not selectable_choices:
+                    console.print("[red]Budget too low for any horse position.[/red]")
+                    return
+
+                horse_choice = horse
+                if horse_choice is None:
+                    horse_choice = int(
+                        Prompt.ask(
+                            "Choose horse number",
+                            choices=selectable_choices,
+                            default=selectable_choices[0],
+                        )
+                    )
+                selected = next((r for r in rows if int(r.get("number", -1)) == int(horse_choice)), None)
+                if selected is None:
+                    console.print("[red]Selected horse not in quote board.[/red]")
+                    return
+                if not bool(selected.get("selectable", False)):
+                    console.print("[red]Selected horse is not selectable for this budget.[/red]")
+                    return
+
+                console.print(Panel(
+                    f"[bold]Quote ID:[/bold] {quote.get('quote_id')}\n"
+                    f"[bold]Budget:[/bold] {stake:.6f} $V\n"
+                    f"[bold]Horse:[/bold] #{selected.get('number')} {selected.get('name')}\n"
+                    f"[bold]Odds:[/bold] {selected.get('odds')}\n"
+                    f"[bold]Debit:[/bold] {selected.get('debit_v')} $V\n"
+                    f"[bold]Payout If Hit:[/bold] {selected.get('payout_if_hit_v')} $V\n"
+                    f"[bold]Expires:[/bold] {quote.get('expires_at')}",
+                    title="Horse Quote Review",
+                    border_style="cyan",
+                ))
+
+                if not Confirm.ask("Proceed with quoted horse play?", default=True):
+                    console.print("[yellow]Cancelled.[/yellow]")
+                    return
+
+                result = await client.play_horse_quote(
+                    quote_id=str(quote.get("quote_id", "")),
+                    horse=int(horse_choice),
+                    idempotency_key=f"cli-horse-play-{uuid.uuid4()}",
+                    demo_mode=demo_force_win,
+                )
             else:
-                result = await client.play_game(game, bet)
+                bet = {"amount": stake, "type": bet_type}
+                result = await client.play_game_demo(game, bet) if demo_force_win else await client.play_game(game, bet)
+
             net = Decimal(str(result.get("net", "0")))
             payout = Decimal(str(result.get("payout", "0")))
             bet_amount = Decimal(str(result.get("bet_amount", stake)))
@@ -430,7 +511,15 @@ def play(
                 console.print(f"[dim]Verify (demo): {verify_hint_for_result(game_id, True)}[/dim]")
 
         except APIError as e:
-            console.print(f"[red]{e.detail}[/red]")
+            detail = str(e.detail)
+            try:
+                parsed = json.loads(detail)
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict) and parsed.get("error"):
+                console.print(f"[red]{parsed.get('error')}: {parsed.get('detail', detail)}[/red]")
+            else:
+                console.print(f"[red]{e.detail}[/red]")
 
     run_async(_play())
 

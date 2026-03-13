@@ -50,6 +50,31 @@ class _FakeClientPlay:
         }
 
 
+class _FakeClientHorseQuote:
+    def __init__(self):
+        self.calls = []
+
+    async def play_horse_quote(self, *, quote_id: str, horse: int, idempotency_key: str, demo_mode: bool = False):
+        self.calls.append(
+            {
+                "quote_id": quote_id,
+                "horse": horse,
+                "idempotency_key": idempotency_key,
+                "demo_mode": demo_mode,
+            }
+        )
+        return {
+            "game_id": "g-horse-1",
+            "quote_id": quote_id,
+            "bet_amount": "19.999932",
+            "payout": "76.000000",
+            "net": "56.000068",
+            "server_seed_hash": "seed-hash",
+            "provably_fair": True,
+            "outcome_data": {"finish_order_nums": [horse, 2, 3]},
+        }
+
+
 @pytest.mark.asyncio
 async def test_execute_render_prefers_render_async():
     renderer = _AsyncRenderer()
@@ -141,6 +166,45 @@ async def test_run_once_timeout_then_next_action_still_works(monkeypatch):
     assert "LIVE MODE" in second
     assert ui.client.payloads[0] == {"amount": 1.0}
     assert ui.client.payloads[1] == {"amount": 1.0}
+
+
+@pytest.mark.asyncio
+async def test_run_once_horse_uses_quote_play_payload(monkeypatch):
+    ui = InlinePromptUI(
+        client=_FakeClientHorseQuote(),
+        console=Console(),
+        render_options=RenderOptions(no_render=True, timeout_sec=0.05),
+    )
+    ui.state.action = "Play"
+    ui.state.game = "horse"
+    ui.state.bet_type = "win"
+    ui.state.amount = "20"
+    ui.state.horse = "1"
+    ui.state.horse_quote_id = "q-1"
+    ui.state.horse_quote_board_hash = "board-hash"
+    ui.state.horse_quote_rows = [
+        {
+            "number": 1,
+            "name": "Thunder Byte",
+            "odds": "3.800000",
+            "effective_multiplier": "3.800000",
+            "unit_price_v": "0.263157",
+            "max_units": 76,
+            "debit_v": "19.999932",
+            "payout_if_hit_v": "76.000000",
+            "selectable": True,
+        }
+    ]
+    ui.state.horse_quote_selected = dict(ui.state.horse_quote_rows[0])
+
+    monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": False})
+
+    out = await ui.run_once()
+    assert "LIVE MODE" in out
+    assert "Game ID: g-horse-1" in out
+    assert len(ui.client.calls) == 1
+    assert ui.client.calls[0]["quote_id"] == "q-1"
+    assert ui.client.calls[0]["horse"] == 1
 
 
 def _dummy_result():

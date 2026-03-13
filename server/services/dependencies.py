@@ -203,8 +203,9 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "013_stripe_billing")
     await require_migration_min(db, "014_demo_mode_isolation")
     await require_migration_min(db, "015_demo_admin_autofund")
+    await require_migration_min(db, "017_horse_quote_pricing")
 
-    await require_tables(db, {"fiat_topups", "stripe_webhook_events"})
+    await require_tables(db, {"fiat_topups", "stripe_webhook_events", "horse_quotes", "horse_quote_idempotency"})
     await require_columns(
         db,
         {

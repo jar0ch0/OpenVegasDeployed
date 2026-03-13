@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
@@ -24,6 +25,11 @@ class WizardState:
     amount: str = "1"
     horse: str = "1"
     game_id: str = ""
+    horse_quote_id: str = ""
+    horse_quote_expires_at: str = ""
+    horse_quote_board_hash: str = ""
+    horse_quote_rows: list[dict] = field(default_factory=list)
+    horse_quote_selected: dict = field(default_factory=dict)
 
 
 def steps_for_state(state: WizardState) -> list[Step]:
@@ -78,6 +84,8 @@ def validate_inputs(state: WizardState) -> str | None:
                 horse = int(state.horse)
                 if horse <= 0:
                     return "Horse number must be a positive integer."
+                if not state.horse_quote_id.strip():
+                    return "Horse quote is required. Fetch quote before horse play."
             return None
 
         if state.action in {"Verify", "Verify (Demo)"}:

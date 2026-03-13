@@ -13,6 +13,7 @@ from typing import Any, Callable
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
 from openvegas.client import APIError, OpenVegasClient
 from openvegas.config import load_config
@@ -144,6 +145,13 @@ class InlinePromptUI:
             timeout_sec=15.0,
         )
 
+    def _clear_horse_quote_state(self) -> None:
+        self.state.horse_quote_id = ""
+        self.state.horse_quote_expires_at = ""
+        self.state.horse_quote_board_hash = ""
+        self.state.horse_quote_rows = []
+        self.state.horse_quote_selected = {}
+
     def _steps_for_state(self) -> list[str]:
         steps = ["action"]
         if self.state.action in {"Play", "Play (Demo Win)"}:
@@ -207,6 +215,8 @@ class InlinePromptUI:
             if signal:
                 return signal
             self.state.action = str(value)
+            if self.state.action not in {"Play", "Play (Demo Win)"}:
+                self._clear_horse_quote_state()
             return "next"
 
         if step == "game":
@@ -214,6 +224,8 @@ class InlinePromptUI:
             if signal:
                 return signal
             self.state.game = str(value)
+            if self.state.game != "horse":
+                self._clear_horse_quote_state()
             return "next"
 
         if step == "bet_type":
@@ -226,6 +238,7 @@ class InlinePromptUI:
             if signal:
                 return signal
             self.state.bet_type = str(value)
+            self._clear_horse_quote_state()
             return "next"
 
         if step == "inputs":
@@ -237,15 +250,28 @@ class InlinePromptUI:
                 return "next"
 
             if self.state.action in {"Play", "Play (Demo Win)"}:
-                value, signal = self._ask_input("Stake ($V)", default=self.state.amount, allow_back=allow_back)
+                amount_label = "Budget cap ($V)" if self.state.game == "horse" else "Stake ($V)"
+                value, signal = self._ask_input(amount_label, default=self.state.amount, allow_back=allow_back)
                 if signal:
                     return signal
                 self.state.amount = str(value)
                 if self.state.game == "horse":
+                    quote = asyncio.run(self._fetch_horse_quote())
+                    if quote is None:
+                        return "stay"
+                    self._print_horse_quote_board(quote)
                     value, signal = self._ask_input("Horse number", default=self.state.horse, allow_back=allow_back)
                     if signal:
                         return signal
                     self.state.horse = str(value)
+                    selected = self._selected_horse_row()
+                    if not selected:
+                        self.console.print("[red]Selected horse is not present in quote board.[/red]")
+                        return "stay"
+                    if not bool(selected.get("selectable", False)):
+                        self.console.print("[red]Selected horse is not selectable for this budget.[/red]")
+                        return "stay"
+                    self.state.horse_quote_selected = selected
                 return "next"
 
             if self.state.action in {"Verify", "Verify (Demo)"}:
@@ -276,9 +302,20 @@ class InlinePromptUI:
         if self.state.action in {"Play", "Play (Demo Win)"}:
             lines.append(f"Game: {self.state.game}")
             if self.state.game == "horse":
+                selected = self.state.horse_quote_selected or self._selected_horse_row() or {}
                 lines.append(f"Bet type: {self.state.bet_type}")
                 lines.append(f"Horse: {self.state.horse}")
-            lines.append(f"Stake: {self.state.amount}")
+                lines.append(f"Quote ID: {self.state.horse_quote_id}")
+                lines.append(f"Odds: {selected.get('odds', '-')}")
+                lines.append(f"Unit price: {selected.get('unit_price_v', '-')}")
+                lines.append(f"Max units: {selected.get('max_units', '-')}")
+                lines.append(f"Debit: {selected.get('debit_v', '-')}")
+                lines.append(f"Payout if hit: {selected.get('payout_if_hit_v', '-')}")
+                lines.append(f"Board hash: {self.state.horse_quote_board_hash}")
+                lines.append(f"Quote expires: {self.state.horse_quote_expires_at}")
+                lines.append(f"Budget cap: {self.state.amount}")
+            else:
+                lines.append(f"Stake: {self.state.amount}")
         elif self.state.action == "Deposit":
             lines.append(f"Amount: {self.state.amount}")
         elif self.state.action in {"Verify", "Verify (Demo)"}:
@@ -329,6 +366,75 @@ class InlinePromptUI:
         except Exception:
             pass
         return {}
+
+    def _selected_horse_row(self) -> dict | None:
+        try:
+            horse_num = int(self.state.horse)
+        except Exception:
+            return None
+        for row in self.state.horse_quote_rows:
+            try:
+                if int(row.get("number", -1)) == horse_num:
+                    return row
+            except Exception:
+                continue
+        return None
+
+    def _print_horse_quote_board(self, quote: dict) -> None:
+        table = Table(title=f"Horse Board ({self.state.bet_type})")
+        table.add_column("#", justify="right")
+        table.add_column("Horse")
+        table.add_column("Odds", justify="right")
+        table.add_column("Eff Mult", justify="right")
+        table.add_column("Unit Price", justify="right")
+        table.add_column("Max Units", justify="right")
+        table.add_column("Debit", justify="right")
+        table.add_column("Payout If Hit", justify="right")
+        table.add_column("Selectable", justify="right")
+        for row in quote.get("horses", []):
+            selectable = bool(row.get("selectable", False))
+            table.add_row(
+                str(row.get("number", "")),
+                str(row.get("name", "")),
+                str(row.get("odds", "")),
+                str(row.get("effective_multiplier", "")),
+                str(row.get("unit_price_v", "")),
+                str(row.get("max_units", "")),
+                str(row.get("debit_v", "")),
+                str(row.get("payout_if_hit_v", "")),
+                "[green]yes[/green]" if selectable else "[red]no[/red]",
+            )
+        self.console.print(table)
+
+    async def _fetch_horse_quote(self) -> dict | None:
+        try:
+            budget = Decimal(self.state.amount)
+        except Exception:
+            self.console.print("[red]Invalid budget amount.[/red]")
+            return None
+
+        try:
+            quote = await self.client.create_horse_quote(
+                bet_type=self.state.bet_type,
+                budget_v=budget,
+                idempotency_key=f"ui-horse-quote-{uuid.uuid4()}",
+            )
+        except APIError as e:
+            payload = self._try_parse_json(str(e.detail))
+            if payload:
+                code = payload.get("error", "request_failed")
+                detail = payload.get("detail", str(e.detail))
+                self.console.print(f"[red]{code}: {detail}[/red]")
+            else:
+                self.console.print(f"[red]API error {e.status}: {e.detail}[/red]")
+            return None
+
+        self.state.horse_quote_id = str(quote.get("quote_id", ""))
+        self.state.horse_quote_expires_at = str(quote.get("expires_at", ""))
+        self.state.horse_quote_board_hash = str(quote.get("board_hash", ""))
+        self.state.horse_quote_rows = list(quote.get("horses", []) or [])
+        self.state.horse_quote_selected = {}
+        return quote
 
     def _render_card_outcome(self, game_code: str, outcome: dict, wager: Decimal, payout: Decimal) -> str:
         if game_code == "blackjack":
@@ -532,15 +638,43 @@ class InlinePromptUI:
                     demo_mode=(action == "Play (Demo Win)"),
                     stake=stake,
                 )
-            payload: dict = {"amount": float(stake)}
             if self.state.game == "horse":
-                payload["horse"] = int(self.state.horse)
-                payload["type"] = self.state.bet_type
+                selected = self.state.horse_quote_selected or self._selected_horse_row()
+                if not self.state.horse_quote_id:
+                    return "Horse quote missing. Go back and fetch quote again."
+                if not selected:
+                    return "Selected horse missing from quote board. Go back and choose again."
+                if not bool(selected.get("selectable", False)):
+                    return "Selected horse is not selectable for this budget."
 
-            if action == "Play (Demo Win)":
-                data = await self.client.play_game_demo(self.state.game, payload)
+                try:
+                    data = await self.client.play_horse_quote(
+                        quote_id=self.state.horse_quote_id,
+                        horse=int(self.state.horse),
+                        idempotency_key=f"ui-horse-play-{uuid.uuid4()}",
+                        demo_mode=(action == "Play (Demo Win)"),
+                    )
+                except APIError as e:
+                    payload = self._try_parse_json(str(e.detail))
+                    if payload.get("error") == "quote_expired":
+                        quote = await self._fetch_horse_quote()
+                        if quote:
+                            self._print_horse_quote_board(quote)
+                            self.state.horse = ""
+                            self.state.horse_quote_selected = {}
+                            return (
+                                "Quote expired. Refreshed horse board.\n"
+                                "Select horse again and re-confirm."
+                            )
+                    if payload:
+                        return f"{payload.get('error')}: {payload.get('detail', '')}"
+                    raise
             else:
-                data = await self.client.play_game(self.state.game, payload)
+                payload: dict = {"amount": float(stake)}
+                if action == "Play (Demo Win)":
+                    data = await self.client.play_game_demo(self.state.game, payload)
+                else:
+                    data = await self.client.play_game(self.state.game, payload)
 
             gr = self._to_game_result(data, stake)
             renderer = self._renderer_for()
@@ -611,6 +745,8 @@ class InlinePromptUI:
                         return
                     if outcome == "back":
                         step_index = max(0, step_index - 1)
+                        continue
+                    if outcome == "stay":
                         continue
                     if outcome == "confirm":
                         break

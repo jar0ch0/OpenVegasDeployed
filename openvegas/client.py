@@ -81,6 +81,39 @@ class OpenVegasClient:
     async def play_game_demo(self, game: str, bet: dict) -> dict:
         return await self._request("POST", f"/games/{game}/play-demo", json=bet)
 
+    async def create_horse_quote(
+        self,
+        *,
+        bet_type: str,
+        budget_v: Decimal | str,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/games/horse/quotes",
+            json={
+                "bet_type": bet_type,
+                "budget_v": str(Decimal(str(budget_v))),
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def play_horse_quote(
+        self,
+        *,
+        quote_id: str,
+        horse: int,
+        idempotency_key: str,
+        demo_mode: bool = False,
+    ) -> dict:
+        payload = {
+            "quote_id": quote_id,
+            "horse": int(horse),
+            "idempotency_key": idempotency_key,
+        }
+        path = "/games/horse/play-demo" if demo_mode else "/games/horse/play"
+        return await self._request("POST", path, json=payload)
+
     async def ask(self, prompt: str, provider: str, model: str) -> dict:
         return await self._request(
             "POST", "/inference/ask",

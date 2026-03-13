@@ -31,6 +31,9 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "014_demo_mode_isolation")' in deps
     assert 'require_migration_min(db, "015_demo_admin_autofund")' in deps
     assert 'require_migration_min(db, "016_human_casino")' in deps
+    assert 'require_migration_min(db, "017_horse_quote_pricing")' in deps
+    assert '"horse_quotes"' in deps
+    assert '"horse_quote_idempotency"' in deps
 
 
 def test_billing_migration_exists_and_hardens_dedupe_and_projection():
@@ -59,4 +62,13 @@ def test_human_casino_migration_exists_and_enforces_uniques():
     assert "CREATE TABLE IF NOT EXISTS human_casino_rounds" in sql
     assert "CREATE TABLE IF NOT EXISTS human_casino_idempotency" in sql
     assert "UNIQUE (round_id)" in sql  # payout + verification
+    assert "UNIQUE (user_id, scope, idempotency_key)" in sql
+
+
+def test_horse_quote_pricing_migration_exists_and_enforces_constraints():
+    sql = _read("supabase/migrations/017_horse_quote_pricing.sql")
+    assert "CREATE TABLE IF NOT EXISTS horse_quotes" in sql
+    assert "CREATE TABLE IF NOT EXISTS horse_quote_idempotency" in sql
+    assert "CHECK (budget_v >= 0)" in sql
+    assert "consumed_at IS NULL AND consumed_game_id IS NULL" in sql
     assert "UNIQUE (user_id, scope, idempotency_key)" in sql
