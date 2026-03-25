@@ -1,0 +1,80 @@
+:root {
+  --black: #040404;
+  --white: #f5f5f5;
+  --grey-dark: #1a1a1a;
+  --grey-mid: #4f4f4f;
+  --grey-light: #9a9a9a;
+  --aqua: #44c6dd;
+  --lime: #7cdf7c;
+  --warn: #ffd166;
+  --bad: #ff7b7b;
+  --ok: #67d389;
+
+  --font-sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at 88% 5%, rgba(68, 198, 221, 0.08), transparent 32%),
+    radial-gradient(circle at 12% 90%, rgba(124, 223, 124, 0.06), transparent 32%),
+    var(--black);
+  color: var(--white);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+}
+
+.text-mono-sm {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--grey-light);
+}
+
+.text-mono-xs {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--grey-mid);
+}
+
+.c-aqua {
+  color: var(--aqua);
+}
+
+.c-lime {
+  color: var(--lime);
+}
+
+.c-warn {
+  color: var(--warn);
+}
+
+.c-bad {
+  color: var(--bad);
+}
+
+.border-b {
+  border-bottom: 1px solid var(--grey-dark);
+}
+
+.border-r {
+  border-right: 1px solid var(--grey-dark);
+}

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from openvegas.payments.service import BillingError, IdempotencyConflict, NotFoundError
@@ -23,6 +24,14 @@ class TopupCheckoutRequest(BaseModel):
 
 class PortalSessionRequest(BaseModel):
     flow_type: Literal["subscription_cancel", "payment_method_update"] | None = None
+
+
+class TopupSuggestRequest(BaseModel):
+    suggested_topup_usd: str | None = None
+
+
+class FakeCompleteRequest(BaseModel):
+    topup_id: str
 
 
 async def require_org_admin(org_id: str, user_id: str) -> None:
@@ -63,6 +72,24 @@ async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/topups/suggest")
+async def suggest_topup(req: TopupSuggestRequest | None = None, user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        suggested: Decimal | None = None
+        if req and req.suggested_topup_usd is not None:
+            try:
+                suggested = Decimal(req.suggested_topup_usd)
+            except (InvalidOperation, TypeError):
+                raise HTTPException(status_code=400, detail="Invalid suggested_topup_usd")
+        return await svc.create_topup_suggestion(
+            user_id=user["user_id"],
+            suggested_topup_usd=suggested,
+        )
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/topups/{topup_id}")
 async def get_topup_status(topup_id: str, user: dict = Depends(get_current_user)):
     svc = get_billing_service()
@@ -72,10 +99,56 @@ async def get_topup_status(topup_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/topups/{topup_id}/qr.svg")
+async def get_topup_qr_svg(topup_id: str, user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        payload = await svc.get_topup_qr_svg(user_id=user["user_id"], topup_id=topup_id)
+        return Response(
+            content=payload,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "private, no-store"},
+        )
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @router.get("/topups/{topup_id}/verify")
 async def verify_topup_status(topup_id: str, user: dict = Depends(get_current_user)):
     """Informational endpoint only; never settles funds."""
     return await get_topup_status(topup_id, user)
+
+
+@router.post("/webhook/fake/complete")
+async def fake_complete(req: FakeCompleteRequest, request: Request):
+    if os.getenv("OPENVEGAS_BILLING_FAKE_WEBHOOK_ENABLED", "0") != "1":
+        raise HTTPException(status_code=404, detail="Not found")
+    if os.getenv("OPENVEGAS_BILLING_PROVIDER", "hybrid").strip().lower() == "stripe":
+        raise HTTPException(status_code=403, detail="Fake completion disabled in stripe mode")
+
+    expected_secret = os.getenv("OPENVEGAS_FAKE_WEBHOOK_SECRET", "").strip()
+    if expected_secret:
+        actual_secret = request.headers.get("X-OpenVegas-Fake-Webhook-Secret", "").strip()
+        if actual_secret != expected_secret:
+            raise HTTPException(status_code=403, detail="Invalid fake webhook secret")
+
+    svc = get_billing_service()
+    try:
+        topup = await svc.get_topup_internal(topup_id=req.topup_id)
+        topup_mode = ""
+        if isinstance(topup, dict):
+            topup_mode = str(topup.get("mode") or "")
+        else:
+            topup_mode = str(getattr(topup, "mode", "") or "")
+        if topup_mode != "simulated":
+            raise HTTPException(status_code=409, detail="Top-up is not simulated")
+        return await svc.complete_fake_topup(topup_id=req.topup_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/orgs/{org_id}/subscription/checkout")

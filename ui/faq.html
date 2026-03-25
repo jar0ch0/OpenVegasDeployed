@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | FAQ</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css" />
+    <link rel="stylesheet" href="/ui/assets/layout.css" />
+    <style>
+      .faq-list { border-top: 1px solid var(--grey-dark); }
+      .faq-item { border-bottom: 1px solid var(--grey-dark); padding: 1rem 0; }
+      .faq-q { font-size: 1.15rem; margin-bottom: .45rem; }
+      .faq-a { color: var(--grey-light); line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"></div>
+        <div id="founderLinks" class="founder-links"></div>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">COMMON QUESTIONS</div>
+          <h1 class="page-title">FAQ</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Operational questions about wallet balance, top-up state, settlement, and user flow behavior.</p>
+      </header>
+
+      <section id="faqList" class="faq-list"></section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js";
+      import { CONTENT } from "/ui/assets/content-registry.js";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const list = document.getElementById("faqList");
+      list.innerHTML = CONTENT.faq
+        .map((item) => `\n          <article class=\"faq-item\">\n            <h2 class=\"faq-q\">${item.q}</h2>\n            <p class=\"faq-a\">${item.a}</p>\n          </article>\n        `)
+        .join("");
+    </script>
+  </body>
+</html>

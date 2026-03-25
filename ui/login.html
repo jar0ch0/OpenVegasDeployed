@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Browser Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css" />
+    <link rel="stylesheet" href="/ui/assets/layout.css" />
+    <style>
+      .login-wrap { max-width: 760px; margin: 0 auto; }
+      .login-form { margin-top: 1rem; }
+      .field-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 10px; }
+      .input {
+        width: 100%;
+        background: #060606;
+        color: var(--white);
+        border: 1px solid var(--grey-dark);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 1.5;
+        padding: 12px;
+      }
+      .token-area { min-height: 100px; }
+      .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+      .status { margin-top: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
+      details { margin-top: 14px; border-top: 1px solid var(--grey-dark); padding-top: 12px; }
+      summary { cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
+    </style>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"></div>
+        <div id="founderLinks" class="founder-links"></div>
+      </div>
+    </nav>
+
+    <main class="container page-shell login-wrap">
+      <header class="page-hero" style="grid-template-columns: 1fr;">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">AUTHENTICATED SURFACE</div>
+          <h1 class="page-title">Browser Login</h1>
+          <p class="text-mono-sm page-lead">
+            Sign in with your OpenVegas credentials. After login, wallet and billing pages use your live account data.
+          </p>
+        </div>
+      </header>
+
+      <section class="card login-form">
+        <div class="text-mono-xs">CREDENTIAL LOGIN</div>
+        <h2 class="card-title">Sign in</h2>
+        <p class="card-copy">Use the same email/password as `openvegas login`.</p>
+
+        <div class="field-grid">
+          <input id="emailInput" class="input" type="email" autocomplete="username" placeholder="Email" />
+          <input id="passwordInput" class="input" type="password" autocomplete="current-password" placeholder="Password" />
+        </div>
+
+        <div class="inline-actions">
+          <button id="loginBtn" class="btn btn-primary" type="button">Login and continue</button>
+          <button id="clearToken" class="btn" type="button">Logout browser</button>
+          <a id="backLink" class="btn" href="/ui/balance">Back to balance</a>
+        </div>
+
+        <details>
+          <summary>Manual token paste (fallback)</summary>
+          <textarea id="tokenInput" class="input token-area" placeholder="Paste bearer token"></textarea>
+          <div class="inline-actions">
+            <button id="saveToken" class="btn" type="button">Save pasted token</button>
+          </div>
+        </details>
+
+        <div id="status" class="status">Not signed in.</div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js";
+      import { authProbe, clearBrowserToken, getBrowserToken, setBrowserToken } from "/ui/assets/page-auth.js";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const params = new URLSearchParams(window.location.search);
+      const rawNext = params.get("next") || "/ui/balance";
+      const next = rawNext.startsWith("/ui") ? rawNext : "/ui/balance";
+      byId("backLink").href = next;
+
+      const statusEl = byId("status");
+      const tokenInput = byId("tokenInput");
+      const existing = getBrowserToken();
+      if (existing) {
+        tokenInput.value = existing;
+        statusEl.textContent = "Token loaded from browser storage.";
+      }
+
+      async function validateAndRedirect() {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          statusEl.textContent = `Token rejected (${probe.status}).`;
+          return;
+        }
+        statusEl.textContent = "Login accepted. Redirecting...";
+        window.location.assign(next);
+      }
+
+      byId("loginBtn")?.addEventListener("click", async () => {
+        const email = byId("emailInput")?.value?.trim() || "";
+        const password = byId("passwordInput")?.value || "";
+        if (!email || !password) {
+          statusEl.textContent = "Email and password are required.";
+          return;
+        }
+
+        statusEl.textContent = "Signing in...";
+        try {
+          const res = await fetch("/ui/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            statusEl.textContent = `Login failed (${res.status}): ${body?.detail || "unknown error"}`;
+            return;
+          }
+
+          const token = String(body?.access_token || "").trim();
+          if (!token) {
+            statusEl.textContent = "Login failed: missing access token.";
+            return;
+          }
+          setBrowserToken(token);
+          tokenInput.value = token;
+          await validateAndRedirect();
+        } catch (err) {
+          statusEl.textContent = `Login request failed: ${String(err)}`;
+        }
+      });
+
+      byId("saveToken")?.addEventListener("click", async () => {
+        const candidate = tokenInput.value.trim();
+        if (!candidate) {
+          statusEl.textContent = "Token is empty.";
+          return;
+        }
+        setBrowserToken(candidate);
+        statusEl.textContent = "Validating token...";
+        try {
+          await validateAndRedirect();
+        } catch (err) {
+          statusEl.textContent = `Validation failed: ${String(err)}`;
+        }
+      });
+
+      byId("clearToken")?.addEventListener("click", () => {
+        clearBrowserToken();
+        tokenInput.value = "";
+        const emailEl = byId("emailInput");
+        const pwEl = byId("passwordInput");
+        if (emailEl) emailEl.value = "";
+        if (pwEl) pwEl.value = "";
+        statusEl.textContent = "Browser session cleared.";
+      });
+    </script>
+  </body>
+</html>

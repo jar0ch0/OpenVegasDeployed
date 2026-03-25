@@ -29,6 +29,7 @@ class AskRequest(BaseModel):
     thread_id: str | None = None
     conversation_mode: str | None = None
     persist_context: bool = True
+    enable_tools: bool = False
 
 
 class ModeUpdateRequest(BaseModel):
@@ -104,6 +105,7 @@ async def ask(
             model=req.model,
             messages=[{"role": "user", "content": req.prompt}],
             idempotency_key=req.idempotency_key,
+            enable_tools=bool(req.enable_tools),
         ))
         await get_provider_thread_service().append_exchange(
             thread_ctx=thread_ctx,
@@ -119,6 +121,7 @@ async def ask(
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "provider_request_id": result.provider_request_id,
+            "tool_calls": result.tool_calls or [],
             "thread_id": thread_ctx.thread_id,
             "thread_status": thread_ctx.thread_status,
             **mode_payload,

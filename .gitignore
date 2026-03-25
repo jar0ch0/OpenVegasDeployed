@@ -71,6 +71,12 @@ supabase/.functions/
 # Local planning / scratch docs (not product docs)
 all-commands.md
 enhancements-plan.md
+.openvegas_tmp_patch.txt
+.openvegas_ml_runbook.md
+seo_stuff
+ui/horse2.html
+ui/index2.html
+ui/screen.png
 
 # Extra local tooling noise
 .hypothesis/
@@ -79,3 +85,6 @@ enhancements-plan.md
 *.tmp
 *.bak
 *.orig
+
+# External reference repos (never commit)
+third_party_external/

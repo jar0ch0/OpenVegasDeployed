@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | How It Works</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css" />
+    <link rel="stylesheet" href="/ui/assets/layout.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"></div>
+        <div id="founderLinks" class="founder-links"></div>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">SYSTEM FLOW</div>
+          <h1 class="page-title">Three-Step<br />Operational Loop</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Top up, execute, settle. The platform keeps these states explicit so users can reason about cost and reliability in real time.</p>
+      </header>
+
+      <section class="section-grid-3">
+        <article class="card border-r">
+          <div class="tag">STEP 01</div>
+          <h2 class="card-title">Fund</h2>
+          <p class="card-copy">User balance is tracked in wallet state and translated to USD-equivalent thresholds for suggestion logic.</p>
+          <div class="spec-row"><span class="text-mono-xs">Trigger</span><span class="text-mono-xs c-aqua">LOW BALANCE FLOOR</span></div>
+        </article>
+        <article class="card border-r">
+          <div class="tag">STEP 02</div>
+          <h2 class="card-title">Execute</h2>
+          <p class="card-copy">Agent tool lifecycle moves through propose/start/result with conflict-safe retries and deterministic finalization.</p>
+          <div class="spec-row"><span class="text-mono-xs">Contract</span><span class="text-mono-xs c-aqua">TYPED ERRORS</span></div>
+        </article>
+        <article class="card">
+          <div class="tag">STEP 03</div>
+          <h2 class="card-title">Settle</h2>
+          <p class="card-copy">Checkout completion settles top-ups idempotently and updates user-visible status and wallet credit.</p>
+          <div class="spec-row"><span class="text-mono-xs">Idempotency</span><span class="text-mono-xs c-lime">TOPUP_ID</span></div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  </body>
+</html>

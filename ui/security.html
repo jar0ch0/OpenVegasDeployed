@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Security</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css" />
+    <link rel="stylesheet" href="/ui/assets/layout.css" />
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"></div>
+        <div id="founderLinks" class="founder-links"></div>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">TRUST</div>
+          <h1 class="page-title">Built for trust, visibility, and control.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">OpenVegas is designed around clear states, ledger-backed balance logic, and predictable funding behavior. Users should know what happened, what is available, and what needs action.</p>
+      </header>
+
+      <section class="section-grid-3">
+        <article class="card border-r">
+          <div class="tag">TRANSPARENT STATES</div>
+          <h2 class="card-title">Payment and balance transitions are surfaced clearly</h2>
+        </article>
+        <article class="card border-r">
+          <div class="tag">OPERATIONAL VISIBILITY</div>
+          <h2 class="card-title">Users can review funding status and transaction history</h2>
+        </article>
+        <article class="card">
+          <div class="tag">CONTROL SURFACES</div>
+          <h2 class="card-title">Thresholds, replenishment logic, and policy-aware controls become more important as AI usage scales</h2>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  </body>
+</html>

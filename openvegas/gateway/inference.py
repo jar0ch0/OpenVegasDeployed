@@ -33,6 +33,7 @@ class InferenceRequest:
     messages: list[dict]
     max_tokens: int = 1024
     idempotency_key: str | None = None
+    enable_tools: bool = False
 
 
 @dataclass
@@ -43,6 +44,7 @@ class InferenceResult:
     v_cost: Decimal = Decimal("0")
     actual_cost_usd: Decimal = Decimal("0")
     provider_request_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class AIGateway:
@@ -592,6 +594,11 @@ class AIGateway:
 
     async def _route_to_provider(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         """Route to the appropriate provider SDK."""
+        if req.enable_tools and req.provider != "openai":
+            raise ContractError(
+                APIErrorCode.INVALID_TRANSITION,
+                "Tool-calling mode is currently supported only for openai provider.",
+            )
         if req.provider == "anthropic":
             return await self._call_anthropic(req, api_key)
         if req.provider == "openai":
@@ -620,16 +627,77 @@ class AIGateway:
         import openai
 
         client = openai.AsyncOpenAI(api_key=api_key)
-        resp = await client.chat.completions.create(
-            model=req.model,
-            max_tokens=req.max_tokens,
-            messages=req.messages,
-        )
+        kwargs: dict[str, Any] = {
+            "model": req.model,
+            "max_tokens": req.max_tokens,
+            "messages": req.messages,
+        }
+        if req.enable_tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "call_local_tool",
+                        "description": "Request local workspace tool execution.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "tool_name": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Read",
+                                        "Search",
+                                        "Write",
+                                        "Bash",
+                                        "List",
+                                    ],
+                                },
+                                "arguments": {"type": "object"},
+                                "shell_mode": {"type": "string", "enum": ["read_only", "mutating"]},
+                                "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 300},
+                            },
+                            "required": ["tool_name", "arguments"],
+                        },
+                    },
+                }
+            ]
+            kwargs["tool_choice"] = "auto"
+        resp = await client.chat.completions.create(**kwargs)
+        msg = resp.choices[0].message
+        parsed_tool_calls: list[dict[str, Any]] = []
+        if req.enable_tools and getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls or []:
+                fn = getattr(tc, "function", None)
+                if not fn:
+                    continue
+                try:
+                    args = json.loads(getattr(fn, "arguments", "") or "{}")
+                except Exception:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                tool_name = str(args.get("tool_name") or getattr(fn, "name", "") or "")
+                if not tool_name:
+                    continue
+                args_obj = args.get("arguments", {}) if isinstance(args.get("arguments"), dict) else {}
+                if not args_obj:
+                    args_obj = {
+                        k: v for k, v in args.items() if k not in {"tool_name", "shell_mode", "timeout_sec"}
+                    }
+                parsed_tool_calls.append(
+                    {
+                        "tool_name": tool_name,
+                        "arguments": args_obj if isinstance(args_obj, dict) else {},
+                        "shell_mode": str(args.get("shell_mode") or "read_only"),
+                        "timeout_sec": int(args.get("timeout_sec") or 30),
+                    }
+                )
         return InferenceResult(
-            text=resp.choices[0].message.content or "",
-            input_tokens=resp.usage.prompt_tokens,
-            output_tokens=resp.usage.completion_tokens,
+            text=msg.content or "",
+            input_tokens=int(getattr(resp.usage, "prompt_tokens", 0) or 0),
+            output_tokens=int(getattr(resp.usage, "completion_tokens", 0) or 0),
             provider_request_id=getattr(resp, "id", None),
+            tool_calls=parsed_tool_calls or None,
         )
 
     async def _call_gemini(self, req: InferenceRequest, api_key: str) -> InferenceResult:
@@ -713,6 +781,7 @@ class AIGateway:
                 "model": req.model,
                 "messages": req.messages,
                 "max_tokens": req.max_tokens,
+                "enable_tools": bool(req.enable_tools),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -730,6 +799,7 @@ class AIGateway:
                 "actual_cost_usd": str(result.actual_cost_usd),
                 "reward_v": str(reward_v),
                 "provider_request_id": result.provider_request_id,
+                "tool_calls": result.tool_calls or [],
             },
             separators=(",", ":"),
             ensure_ascii=False,
@@ -751,6 +821,7 @@ class AIGateway:
             v_cost=Decimal(str(payload.get("v_cost", "0"))).quantize(V_SCALE),
             actual_cost_usd=Decimal(str(payload.get("actual_cost_usd", "0"))).quantize(V_SCALE),
             provider_request_id=payload.get("provider_request_id"),
+            tool_calls=payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else None,
         )
 
     @staticmethod

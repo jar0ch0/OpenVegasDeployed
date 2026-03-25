@@ -35,6 +35,12 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "018_wrapper_default_foundation")' in deps
     assert 'require_migration_min(db, "019_inference_idempotency_and_holds")' in deps
     assert 'require_migration_min(db, "020_provider_context_threads")' in deps
+    assert 'require_migration_min(db, "021_agent_orchestration_v26")' in deps
+    assert 'require_migration_min(db, "022_agent_chat_tool_runtime_v30")' in deps
+    assert 'require_migration_min(db, "025_agent_tool_heartbeat_column_v30_fix")' in deps
+    assert 'require_migration_min(db, "026_agent_tool_cancelled_status_v30")' in deps
+    assert 'require_migration_min(db, "027_agent_tool_result_payload_column_v30_fix")' in deps
+    assert 'require_migration_min(db, "028_billing_topup_hardening")' in deps
     assert '"horse_quotes"' in deps
     assert '"horse_quote_idempotency"' in deps
     assert '"provider_credentials"' in deps
@@ -43,8 +49,19 @@ def test_startup_schema_requires_security_migrations():
     assert '"wrapper_reward_events"' in deps
     assert '"org_runtime_policies"' in deps
     assert '"context_retention_policies"' in deps
+    assert '("fiat_topups", "mode")' in deps
+    assert '("fiat_topups", "expires_at")' in deps
+    assert '("fiat_topups", "manual_reconciliation_required")' in deps
     assert '"provider_threads"' in deps
     assert '"provider_thread_messages"' in deps
+    assert '"agent_runs"' in deps
+    assert '"agent_run_events"' in deps
+    assert '"agent_run_tool_calls"' in deps
+    assert '"agent_tool_approvals"' in deps
+    assert '"agent_run_holds"' in deps
+    assert '"agent_run_mutation_leases"' in deps
+    assert '"agent_mutation_replays"' in deps
+    assert '"run_status_projection"' in deps
 
 
 def test_billing_migration_exists_and_hardens_dedupe_and_projection():
@@ -112,3 +129,126 @@ def test_provider_context_threads_migration_exists_and_scopes_threads_per_provid
     assert "thread_forked_from UUID REFERENCES provider_threads(id)" in sql
     assert "CREATE TABLE IF NOT EXISTS provider_thread_messages" in sql
     assert "020_provider_context_threads" in sql
+
+
+def test_agent_orchestration_v26_migration_exists_and_enforces_replay_and_ordering_contracts():
+    sql = _read("supabase/migrations/021_agent_orchestration_v26.sql")
+    assert "CREATE TABLE IF NOT EXISTS agent_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_run_events" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_run_tool_calls" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_tool_approvals" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_run_holds" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_run_mutation_leases" in sql
+    assert "CREATE TABLE IF NOT EXISTS agent_mutation_replays" in sql
+    assert "CREATE TABLE IF NOT EXISTS run_status_projection" in sql
+    assert "UNIQUE (run_id, event_seq)" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_replay_run_scope" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_replay_tool_scope" in sql
+    assert "ck_replay_truncation_hash" in sql
+    assert "ck_replay_completed_payload" in sql
+    assert "ck_replay_content_type_json" in sql
+    assert "ck_replay_response_status_range" in sql
+    assert "ck_hold_amount_nonnegative" in sql
+    assert "ck_agent_runs_version_nonnegative" in sql
+    assert "ck_agent_runs_event_seq_nonnegative" in sql
+    assert "ck_projection_last_event_seq_nonnegative" in sql
+    assert "021_agent_orchestration_v26" in sql
+
+
+def test_agent_chat_tool_runtime_v30_migration_exists_and_hardens_tool_callback_columns():
+    sql = _read("supabase/migrations/022_agent_chat_tool_runtime_v30.sql")
+    assert "ADD COLUMN IF NOT EXISTS runtime_session_id UUID" in sql
+    assert "ADD COLUMN IF NOT EXISTS execution_token TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS request_payload_json JSONB" in sql
+    assert "ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ" in sql
+    assert "ADD COLUMN IF NOT EXISTS result_submission_hash TEXT" in sql
+    assert "ADD COLUMN IF NOT EXISTS terminal_response_status INT" in sql
+    assert "ck_tool_terminal_response_payload" in sql
+    assert "ck_tool_terminal_response_hash" in sql
+    assert "ck_tool_proposed_unclaimed" in sql
+    assert "022_agent_chat_tool_runtime_v30" in sql
+
+
+def test_agent_chat_tool_runtime_indexes_migration_exists():
+    sql = _read("supabase/migrations/023_agent_chat_tool_runtime_indexes_v30.sql")
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_run_event_seq" in sql
+    assert "CREATE INDEX IF NOT EXISTS idx_tool_calls_run_status_token" in sql
+    assert "CREATE INDEX IF NOT EXISTS idx_mutation_leases_expires" in sql
+    assert "023_agent_chat_tool_runtime_indexes_v30" in sql
+
+
+def test_agent_chat_turns_optional_migration_exists():
+    sql = _read("supabase/migrations/024_agent_chat_turns_optional_v30.sql")
+    assert "CREATE TABLE IF NOT EXISTS agent_chat_turns" in sql
+    assert "UNIQUE (run_id, turn_no)" in sql
+    assert "024_agent_chat_turns_optional_v30" in sql
+
+
+def test_agent_tool_heartbeat_column_fix_migration_exists():
+    sql = _read("supabase/migrations/025_agent_tool_heartbeat_column_v30_fix.sql")
+    assert "ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ" in sql
+    assert "025_agent_tool_heartbeat_column_v30_fix" in sql
+
+
+def test_agent_tool_cancelled_status_migration_exists_and_hardens_constraints():
+    sql = _read("supabase/migrations/026_agent_tool_cancelled_status_v30.sql")
+    assert "ck_tool_status_domain" in sql
+    assert "'cancelled'" in sql
+    assert "ck_tool_terminal_requires_finished" in sql
+    assert "status NOT IN ('succeeded','failed','timed_out','blocked')" in sql
+    assert "026_agent_tool_cancelled_status_v30" in sql
+
+
+def test_agent_tool_result_payload_fix_migration_exists():
+    sql = _read("supabase/migrations/027_agent_tool_result_payload_column_v30_fix.sql")
+    assert "ADD COLUMN IF NOT EXISTS result_payload JSONB" in sql
+    assert "027_agent_tool_result_payload_column_v30_fix" in sql
+
+
+def test_billing_topup_hardening_migration_exists_and_adds_mode_expiry_reconciliation_fields():
+    sql = _read("supabase/migrations/028_billing_topup_hardening.sql")
+    assert "ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'stripe'" in sql
+    assert "ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL" in sql
+    assert "ADD COLUMN IF NOT EXISTS manual_reconciliation_required BOOLEAN NOT NULL DEFAULT FALSE" in sql
+    assert "ALTER TYPE fiat_topup_status ADD VALUE 'expired'" in sql
+    assert "ALTER TYPE fiat_topup_status ADD VALUE 'manual_reconciliation_required'" in sql
+    assert "028_billing_topup_hardening" in sql
+
+
+def test_callback_mutator_modules_do_not_touch_replay_helpers():
+    callback_modules = [
+        "openvegas/agent/mutators/tool_start.py",
+        "openvegas/agent/mutators/tool_heartbeat.py",
+        "openvegas/agent/mutators/tool_result.py",
+        "openvegas/agent/mutators/tool_cancel.py",
+        "openvegas/agent/tool_cas.py",
+    ]
+    for module in callback_modules:
+        src = _read(module)
+        assert "INSERT INTO agent_mutation_replays" not in src
+        assert "UPDATE agent_mutation_replays" not in src
+        assert "FROM agent_mutation_replays" not in src
+        assert "from openvegas.agent.replay" not in src
+
+
+def test_claimed_at_is_aligned_with_tool_start_cas():
+    cas = _read("openvegas/agent/tool_cas.py")
+    assert "SET status='started', claimed_at=now(), started_at=now(), last_heartbeat_at=now(), updated_at=now()" in cas
+
+
+def test_ci_callback_replay_boundary_script_exists():
+    script = _read("scripts/ci/check_callback_replay_boundary.py")
+    assert "CALLBACK_MODULES" in script
+    assert "tool_start.py" in script
+    assert "tool_heartbeat.py" in script
+    assert "tool_result.py" in script
+    assert "tool_cancel.py" in script
+    assert "agent_mutation_replays" in script
+
+
+def test_ci_tool_request_immutability_script_exists():
+    script = _read("scripts/ci/check_tool_request_immutability.py")
+    assert "IMMUTABLE_COLUMNS" in script
+    assert "request_payload_json" in script
+    assert "payload_hash" in script
+    assert "execution_token" in script

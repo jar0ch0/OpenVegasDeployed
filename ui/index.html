@@ -10,320 +10,100 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap"
       rel="stylesheet"
     />
-    <style>
-      :root {
-        --black: #040404;
-        --white: #f5f5f5;
-        --grey-dark: #1a1a1a;
-        --grey-mid: #4f4f4f;
-        --grey-light: #9a9a9a;
-        --aqua: #44c6dd;
-        --lime: #7cdf7c;
-
-        --font-sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
-      }
-
-      * {
-        box-sizing: border-box;
-        margin: 0;
-        padding: 0;
-      }
-
-      body {
-        background: radial-gradient(circle at 88% 5%, rgba(68, 198, 221, 0.08), transparent 32%),
-          radial-gradient(circle at 12% 90%, rgba(124, 223, 124, 0.06), transparent 32%), var(--black);
-        color: var(--white);
-        font-family: var(--font-sans);
-        min-height: 100vh;
-        overflow-x: hidden;
-      }
-
-      .text-huge {
-        font-size: clamp(3.2rem, 8vw, 6.8rem);
-        font-weight: 400;
-        line-height: 0.88;
-        letter-spacing: -0.045em;
-      }
-
-      .text-mono-sm {
-        font-family: var(--font-mono);
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--grey-light);
-      }
-
-      .text-mono-xs {
-        font-family: var(--font-mono);
-        font-size: 9px;
-        text-transform: uppercase;
-        letter-spacing: 0.11em;
-        color: var(--grey-mid);
-      }
-
-      .border-b { border-bottom: 1px solid var(--grey-dark); }
-      .border-r { border-right: 1px solid var(--grey-dark); }
-
-      .top-nav {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1.35rem 2rem;
-        position: sticky;
-        top: 0;
-        z-index: 20;
-        backdrop-filter: blur(8px);
-        background: rgba(4, 4, 4, 0.82);
-      }
-
-      .nav-link {
-        color: var(--grey-light);
-        text-decoration: none;
-        transition: color 0.2s ease;
-      }
-
-      .nav-link:hover { color: var(--white); }
-
-      .page-header {
-        padding: 4.2rem 2rem;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 2rem;
-        align-items: end;
-      }
-
-      .header-desc {
-        max-width: 430px;
-        line-height: 1.7;
-        color: var(--white);
-      }
-
-      .models-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        border-top: 1px solid var(--grey-dark);
-      }
-
-      .model-card {
-        padding: 2.8rem 2rem;
-        min-height: 520px;
-        display: flex;
-        flex-direction: column;
-        background: rgba(255, 255, 255, 0.01);
-        transition: background 0.25s ease, transform 0.25s ease;
-      }
-
-      .model-card:hover {
-        background: rgba(255, 255, 255, 0.03);
-        transform: translateY(-2px);
-      }
-
-      .tag {
-        font-family: var(--font-mono);
-        font-size: 9px;
-        border: 1px solid var(--aqua);
-        color: var(--aqua);
-        display: inline-block;
-        padding: 2px 6px;
-        margin-bottom: 1rem;
-      }
-
-      .model-ascii-container {
-        height: 190px;
-        margin-bottom: 2rem;
-        border: 1px solid var(--grey-dark);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(255, 255, 255, 0.018);
-        font-family: var(--font-mono);
-        font-size: 12px;
-        line-height: 1.1;
-        color: var(--grey-mid);
-      }
-
-      .model-title {
-        font-size: 1.72rem;
-        font-weight: 400;
-        margin-bottom: 1rem;
-        letter-spacing: -0.02em;
-      }
-
-      .model-desc {
-        font-size: 0.95rem;
-        color: var(--grey-light);
-        line-height: 1.66;
-        margin-bottom: 1.8rem;
-      }
-
-      .spec-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0.75rem 0;
-        border-top: 1px solid var(--grey-dark);
-      }
-
-      .c-aqua { color: var(--aqua); }
-      .c-lime { color: var(--lime); }
-
-      .footer-meta {
-        padding: 3.8rem 2rem;
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 2rem;
-      }
-
-      @media (max-width: 1024px) {
-        .page-header {
-          grid-template-columns: 1fr;
-          gap: 2rem;
-        }
-        .models-grid {
-          grid-template-columns: 1fr 1fr;
-        }
-      }
-
-      @media (max-width: 768px) {
-        .models-grid,
-        .footer-meta {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="/ui/assets/theme.css" />
+    <link rel="stylesheet" href="/ui/assets/layout.css" />
   </head>
   <body>
-    <nav class="top-nav border-b">
-      <a href="/" class="text-mono-sm nav-link">[ BACK TO INDEX ]</a>
-      <div class="text-mono-sm">DIRECTORY: OPENVEGAS_COMPUTE_MESH_V1</div>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"></div>
+        <div id="founderLinks" class="founder-links"></div>
+      </div>
     </nav>
 
-    <header class="page-header border-b">
-      <div>
-        <div class="text-mono-xs" style="margin-bottom: 1rem">TOKENIZED COMPUTE INFRASTRUCTURE</div>
-        <h1 class="text-huge">Wagered<br />Compute.</h1>
-      </div>
-      <div>
-        <p class="text-mono-sm header-desc">
-          OpenVegas turns idle inference budget into a programmable compute liquidity layer across OpenAI,
-          Anthropic, and Gemini. Users mint, wager, and redeem with auditable settlement.
-        </p>
-      </div>
-    </header>
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">TOKENIZED COMPUTE INFRASTRUCTURE</div>
+          <h1 class="page-title">Run AI Work.<br />No Credit Downtime.</h1>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="/ui/pricing">View pricing</a>
+            <a class="btn" href="/ui/balance">Open balance</a>
+            <a class="btn" href="/ui/balance#payments">Top-up flow</a>
+          </div>
+        </div>
+        <div>
+          <p class="text-mono-sm page-lead">
+            OpenVegas turns wallet balance into programmable compute liquidity with deterministic settlement,
+            low-balance top-up loops, and terminal-native workflows for teams shipping with AI.
+          </p>
+        </div>
+      </header>
 
-    <main class="models-grid">
-      <section class="model-card border-r border-b">
-        <div class="tag">REAL-TIME FLOW</div>
-        <div class="model-ascii-container">
-<pre>   <span class="c-aqua">/ \</span>
-  <span class="c-aqua">/---\</span>
- <span class="c-aqua">/  $  \</span>
-<span class="c-aqua">|V  ↔  T|</span>
-<span class="c-aqua">|  API  |</span>
-<span class="c-aqua">| ROUTE |</span>
- <span class="c-aqua">\     /</span>
-  <span class="c-aqua">\---/</span></pre>
-        </div>
-        <h2 class="model-title">Credit Exchange</h2>
-        <p class="model-desc">
-          Deterministic ledger-backed conversion between $V and inference entitlements with idempotent order
-          settlement and grant inventory tracking.
-        </p>
+      <section class="section-grid-3">
+        <article class="card border-r">
+          <div class="tag">REAL-TIME FLOW</div>
+          <h2 class="card-title">Credit Exchange</h2>
+          <p class="card-copy">
+            Convert wallet value into inference spend with idempotent execution contracts and explicit status
+            transitions.
+          </p>
+          <div class="spec-row"><span class="text-mono-xs">Settlement</span><span class="text-mono-xs c-aqua">ATOMIC</span></div>
+          <div class="spec-row"><span class="text-mono-xs">Providers</span><span class="text-mono-xs">OPENAI / ANTHROPIC / GEMINI</span></div>
+          <div class="spec-row"><span class="text-mono-xs">Reliability</span><span class="text-mono-xs c-lime">STRICT IDEMPOTENCY</span></div>
+        </article>
 
-        <div class="spec-row">
-          <span class="text-mono-xs">Settlement</span>
-          <span class="text-mono-xs c-aqua">ATOMIC TX</span>
-        </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Provider Coverage</span>
-          <span class="text-mono-xs">OPENAI / ANTHROPIC / GEMINI</span>
-        </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Idempotency</span>
-          <span class="text-mono-xs c-lime">STRICT</span>
-        </div>
+        <article class="card border-r">
+          <div class="tag" style="border-color:var(--white); color:var(--white);">BILLING UX</div>
+          <h2 class="card-title">Top-up Surface</h2>
+          <p class="card-copy">
+            Balance, payment, transaction, and top-up pages are unified so users can understand wallet health and act
+            immediately.
+          </p>
+          <div class="spec-row"><span class="text-mono-xs">Low-Balance</span><span class="text-mono-xs c-aqua">SUGGEST + REUSE</span></div>
+          <div class="spec-row"><span class="text-mono-xs">Checkout</span><span class="text-mono-xs">URL + QR</span></div>
+          <div class="spec-row"><span class="text-mono-xs">States</span><span class="text-mono-xs c-lime">PAID / EXPIRED / REVIEW</span></div>
+        </article>
+
+        <article class="card">
+          <div class="tag" style="border-color:var(--grey-mid); color:var(--grey-light);">FOUNDER MODE</div>
+          <h2 class="card-title">Pitch Narrative</h2>
+          <p class="card-copy">
+            A 12-slide founder deck mirrors proven high-conviction story structure while staying grounded in OpenVegas
+            product and billing mechanics.
+          </p>
+          <div class="spec-row"><span class="text-mono-xs">Deck Model</span><span class="text-mono-xs c-aqua">AIRBNB-STYLE ARC</span></div>
+          <div class="spec-row"><span class="text-mono-xs">Slide Nav</span><span class="text-mono-xs">ARROWS + KEYBOARD</span></div>
+          <div class="spec-row"><span class="text-mono-xs">Citations</span><span class="text-mono-xs c-lime">MARKET DATA REGISTRY</span></div>
+        </article>
       </section>
 
-      <section class="model-card border-r border-b">
-        <div class="tag" style="border-color: var(--white); color: var(--white)">AGENT-FIRST</div>
-        <div class="model-ascii-container">
-<pre>  <span class="c-aqua">+-------+</span>
- /       /|
-<span class="c-aqua">+-------+</span> |
-|  AGT  | <span class="c-aqua">+</span>
-|  SDK  |/
-<span class="c-aqua">+-------+</span></pre>
+      <section class="footer-meta">
+        <div>
+          <div class="text-mono-xs">START HERE</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/how-it-works</div>
         </div>
-        <h2 class="model-title">Session Envelope</h2>
-        <p class="model-desc">
-          Scoped agent tokens with envelope budgets, event trails, and rate-limited infer/boost/casino actions.
-          Built for autonomous runtimes like OpenClaw.
-        </p>
-
-        <div class="spec-row">
-          <span class="text-mono-xs">Auth Model</span>
-          <span class="text-mono-xs c-aqua">HASHED OV_AGENT_*</span>
+        <div>
+          <div class="text-mono-xs">BILLING</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/balance</div>
         </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Budget Control</span>
-          <span class="text-mono-xs">RESERVE + SETTLE</span>
+        <div>
+          <div class="text-mono-xs">CHECKOUT</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/balance#payments</div>
         </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Audit Trail</span>
-          <span class="text-mono-xs c-lime">SESSION EVENTS</span>
-        </div>
-      </section>
-
-      <section class="model-card border-b">
-        <div class="tag" style="border-color: var(--grey-mid); color: var(--grey-mid)">PROVABLY FAIR</div>
-        <div class="model-ascii-container">
-<pre> <span class="c-aqua">.---.   .---.</span>
-<span class="c-aqua">(seed) (hash)</span>
- <span class="c-aqua">`---'\ /`---'</span>
-      <span class="c-aqua">X</span>
- <span class="c-aqua">.---./ \.---.</span>
-<span class="c-aqua">(rng ) (log )</span>
- <span class="c-aqua">`---'   `---'</span></pre>
-        </div>
-        <h2 class="model-title">Risk Engine</h2>
-        <p class="model-desc">
-          Casino and race outcomes are deterministic and verifiable with commit/reveal traces, while dynamic
-          odds and volatility preserve entertaining upside.
-        </p>
-
-        <div class="spec-row">
-          <span class="text-mono-xs">Fairness</span>
-          <span class="text-mono-xs c-aqua">COMMIT / REVEAL</span>
-        </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Replayability</span>
-          <span class="text-mono-xs">JSON-SAFE CHECKPOINTS</span>
-        </div>
-        <div class="spec-row">
-          <span class="text-mono-xs">Integrity</span>
-          <span class="text-mono-xs c-lime">RECONCILED</span>
+        <div>
+          <div class="text-mono-xs">FOUNDER DECK</div>
+          <div class="text-mono-sm c-aqua" style="margin-top:.5rem;">/ui/slidedeck/01-cover.html</div>
         </div>
       </section>
     </main>
 
-    <footer class="footer-meta">
-      <div>
-        <div class="text-mono-xs">NODE_ALPHA</div>
-        <div class="text-mono-sm" style="color: var(--white); margin-top: 0.5rem">US-EAST<br />ACTIVE</div>
-      </div>
-      <div>
-        <div class="text-mono-xs">NODE_BRAVO</div>
-        <div class="text-mono-sm" style="color: var(--white); margin-top: 0.5rem">EU-CENTRAL<br />ACTIVE</div>
-      </div>
-      <div>
-        <div class="text-mono-xs">NODE_CHARLIE</div>
-        <div class="text-mono-sm" style="color: var(--white); margin-top: 0.5rem">AP-SOUTHEAST<br />WARMING</div>
-      </div>
-      <div>
-        <div class="text-mono-xs">SYSTEM HEALTH</div>
-        <div class="text-mono-sm c-aqua" style="margin-top: 0.5rem">OPTIMIZED [99.98%]</div>
-      </div>
-    </footer>
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
   </body>
 </html>

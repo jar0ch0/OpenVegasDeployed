@@ -15,8 +15,10 @@ from openvegas.fraud.engine import FraudEngine
 from openvegas.gateway.catalog import ProviderCatalog
 from openvegas.gateway.inference import AIGateway
 from openvegas.mint.engine import MintService
+from openvegas.payments.fake_gateway import FakeGateway
 from openvegas.payments.service import BillingService
 from openvegas.payments.stripe_gateway import StripeGateway
+from openvegas.telemetry import emit_metric
 from openvegas.wallet.ledger import WalletService
 from server.services.llm_mode import LLMModeService
 from server.services.provider_threads import ProviderThreadService
@@ -212,6 +214,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "017_horse_quote_pricing")
     await require_migration_min(db, "018_wrapper_default_foundation")
     await require_migration_min(db, "019_inference_idempotency_and_holds")
+    await require_migration_min(db, "028_billing_topup_hardening")
 
     await require_tables(
         db,
@@ -236,6 +239,11 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("org_sponsorships", "cancel_at_period_end"),
             ("org_sponsorships", "current_period_end"),
             ("game_history", "is_demo"),
+            ("fiat_topups", "mode"),
+            ("fiat_topups", "expires_at"),
+            ("fiat_topups", "manual_reconciliation_required"),
+            ("fiat_topups", "manual_reconciliation_reason"),
+            ("fiat_topups", "manual_reconciliation_marked_at"),
         },
     )
 
@@ -252,7 +260,41 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
 
     if flags.agent_runtime_enabled:
         await require_migration_min(db, "010_agent_session_events_and_precision")
+        await require_migration_min(db, "021_agent_orchestration_v26")
+        await require_migration_min(db, "022_agent_chat_tool_runtime_v30")
+        await require_migration_min(db, "025_agent_tool_heartbeat_column_v30_fix")
+        await require_migration_min(db, "026_agent_tool_cancelled_status_v30")
+        await require_migration_min(db, "027_agent_tool_result_payload_column_v30_fix")
         await require_tables(db, {"agent_accounts", "agent_tokens", "agent_sessions", "agent_session_events"})
+        await require_tables(
+            db,
+            {
+                "agent_runs",
+                "agent_run_events",
+                "agent_run_tool_calls",
+                "agent_tool_approvals",
+                "agent_run_holds",
+                "agent_run_mutation_leases",
+                "agent_mutation_replays",
+                "run_status_projection",
+            },
+        )
+        await require_columns(
+            db,
+            {
+                ("agent_runs", "workspace_root"),
+                ("agent_runs", "workspace_fingerprint"),
+                ("agent_runs", "git_root"),
+                ("agent_runs", "runtime_session_id"),
+                ("agent_run_tool_calls", "execution_token"),
+                ("agent_run_tool_calls", "request_payload_json"),
+                ("agent_run_tool_calls", "last_heartbeat_at"),
+                ("agent_run_tool_calls", "result_submission_hash"),
+                ("agent_run_tool_calls", "result_payload"),
+                ("agent_run_tool_calls", "terminal_response_status"),
+                ("agent_run_tool_calls", "terminal_response_body_text"),
+            },
+        )
 
     if flags.human_casino_enabled:
         await require_migration_min(db, "016_human_casino")
@@ -383,6 +425,12 @@ def get_agent_service():
     return AgentService(get_db(), get_wallet())
 
 
+def get_agent_orchestration_service():
+    from openvegas.agent.orchestration_service import AgentOrchestrationService
+
+    return AgentOrchestrationService(get_db())
+
+
 def get_boost_service():
     from openvegas.agent.boost import BoostService
 
@@ -414,4 +462,37 @@ def get_store_service():
 
 
 def get_billing_service() -> BillingService:
-    return BillingService(get_db(), get_wallet(), StripeGateway())
+    return BillingService(get_db(), get_wallet(), _build_billing_gateway())
+
+
+def _runtime_env_name() -> str:
+    return str(os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local"))).strip().lower()
+
+
+def _is_production_env() -> bool:
+    return _runtime_env_name() in {"prod", "production"}
+
+
+def _stripe_configured() -> bool:
+    return bool(os.getenv("STRIPE_SECRET_KEY", "").strip())
+
+
+def _build_billing_gateway():
+    mode = str(os.getenv("OPENVEGAS_BILLING_PROVIDER", "hybrid")).strip().lower()
+    if mode == "stripe":
+        return StripeGateway()
+    if mode == "simulated":
+        return FakeGateway()
+
+    # hybrid mode
+    if _stripe_configured():
+        try:
+            return StripeGateway()
+        except Exception:
+            pass
+
+    if _is_production_env() and os.getenv("OPENVEGAS_ALLOW_HYBRID_FAKE_IN_PROD", "0") != "1":
+        raise RuntimeError("Hybrid billing resolved to fake in production without explicit allow override")
+    emit_metric("billing_hybrid_resolved_to_fake_total", {"env": _runtime_env_name() or "unknown"})
+    _log.warning("Hybrid billing resolved to simulated provider")
+    return FakeGateway()

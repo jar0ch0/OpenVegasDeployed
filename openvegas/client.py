@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
+from typing import Any, AsyncGenerator
 
 import httpx
 
@@ -10,9 +12,10 @@ from openvegas.config import get_backend_url, get_bearer_token
 
 
 class APIError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, data: dict | None = None):
         self.status = status
         self.detail = detail
+        self.data = data or {}
         super().__init__(f"API error {status}: {detail}")
 
 
@@ -30,21 +33,31 @@ class OpenVegasClient:
         return h
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=self._headers(),
-                **kwargs,
-            )
-            if resp.status_code >= 400:
-                detail = resp.text
-                try:
-                    detail = resp.json().get("detail", resp.text)
-                except Exception:
-                    pass
-                raise APIError(resp.status_code, detail)
-            return resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    headers=self._headers(),
+                    **kwargs,
+                )
+                if resp.status_code >= 400:
+                    detail = resp.text
+                    data: dict | None = None
+                    try:
+                        body = resp.json()
+                        if isinstance(body, dict):
+                            data = body
+                            detail = body.get("detail") or body.get("error") or resp.text
+                    except Exception:
+                        pass
+                    raise APIError(resp.status_code, detail, data=data)
+                return resp.json()
+        except httpx.HTTPError as e:
+            raise APIError(
+                503,
+                f"Backend request failed: {type(e).__name__}. Check server is running and reachable at {self.base_url}.",
+            ) from e
 
     async def get_balance(self) -> dict:
         return await self._request("GET", "/wallet/balance")
@@ -124,6 +137,7 @@ class OpenVegasClient:
         thread_id: str | None = None,
         conversation_mode: str | None = None,
         persist_context: bool | None = None,
+        enable_tools: bool | None = None,
     ) -> dict:
         payload = {"prompt": prompt, "provider": provider, "model": model}
         if idempotency_key:
@@ -134,6 +148,8 @@ class OpenVegasClient:
             payload["conversation_mode"] = conversation_mode
         if persist_context is not None:
             payload["persist_context"] = bool(persist_context)
+        if enable_tools is not None:
+            payload["enable_tools"] = bool(enable_tools)
         return await self._request("POST", "/inference/ask", json=payload)
 
     async def get_mode(self) -> dict:
@@ -186,8 +202,21 @@ class OpenVegasClient:
             payload["idempotency_key"] = idempotency_key
         return await self._request("POST", "/billing/topups/checkout", json=payload)
 
+    async def suggest_topup(self, suggested_topup_usd: Decimal | str | None = None) -> dict:
+        payload: dict[str, str] = {}
+        if suggested_topup_usd is not None:
+            payload["suggested_topup_usd"] = str(suggested_topup_usd)
+        return await self._request("POST", "/billing/topups/suggest", json=payload)
+
     async def get_topup_status(self, topup_id: str) -> dict:
         return await self._request("GET", f"/billing/topups/{topup_id}")
+
+    async def complete_fake_topup(self, topup_id: str) -> dict:
+        return await self._request(
+            "POST",
+            "/billing/webhook/fake/complete",
+            json={"topup_id": str(topup_id)},
+        )
 
     async def human_casino_start_session(
         self,
@@ -277,3 +306,372 @@ class OpenVegasClient:
                 "idempotency_key": idempotency_key,
             },
         )
+
+    async def agent_run_create(
+        self,
+        *,
+        state: str = "running",
+        is_resumable: bool = False,
+        expires_in_seconds: int | None = None,
+    ) -> dict:
+        payload: dict = {"state": state, "is_resumable": bool(is_resumable)}
+        if expires_in_seconds is not None:
+            payload["expires_in_seconds"] = int(expires_in_seconds)
+        return await self._request("POST", "/agent/runs", json=payload)
+
+    async def agent_run_get(self, run_id: str) -> dict:
+        return await self._request("GET", f"/agent/runs/{run_id}")
+
+    async def agent_run_transition(
+        self,
+        *,
+        run_id: str,
+        action: str,
+        expected_run_version: int,
+        expected_valid_actions_signature: str,
+        idempotency_key: str,
+        payload: dict | None = None,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/transition",
+            json={
+                "action": action,
+                "payload": payload or {},
+                "expected_run_version": int(expected_run_version),
+                "expected_valid_actions_signature": expected_valid_actions_signature,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def agent_run_cancel(
+        self,
+        *,
+        run_id: str,
+        expected_run_version: int,
+        expected_valid_actions_signature: str,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/cancel",
+            json={
+                "expected_run_version": int(expected_run_version),
+                "expected_valid_actions_signature": expected_valid_actions_signature,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def agent_run_handoff_check(self, *, run_id: str) -> dict:
+        return await self._request("POST", f"/agent/runs/{run_id}/ui/handoff-check", json={})
+
+    async def agent_register_workspace(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        workspace_root: str,
+        workspace_fingerprint: str,
+        git_root: str | None = None,
+    ) -> dict:
+        payload: dict = {
+            "runtime_session_id": runtime_session_id,
+            "workspace_root": workspace_root,
+            "workspace_fingerprint": workspace_fingerprint,
+        }
+        if git_root:
+            payload["git_root"] = git_root
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/session/register-workspace",
+            json=payload,
+        )
+
+    async def agent_tool_propose(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        expected_run_version: int,
+        expected_valid_actions_signature: str,
+        idempotency_key: str,
+        tool_name: str,
+        arguments: dict,
+        shell_mode: str | None = None,
+        timeout_sec: int | None = None,
+        plan_mode: bool = False,
+    ) -> dict:
+        payload: dict = {
+            "runtime_session_id": runtime_session_id,
+            "expected_run_version": int(expected_run_version),
+            "expected_valid_actions_signature": expected_valid_actions_signature,
+            "idempotency_key": idempotency_key,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "plan_mode": bool(plan_mode),
+        }
+        if shell_mode is not None:
+            payload["shell_mode"] = shell_mode
+        if timeout_sec is not None:
+            payload["timeout_sec"] = int(timeout_sec)
+        return await self._request("POST", f"/agent/runs/{run_id}/tools/propose", json=payload)
+
+    async def agent_tool_start(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        tool_call_id: str,
+        execution_token: str,
+        expected_run_version: int,
+        expected_valid_actions_signature: str,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/tools/start",
+            json={
+                "runtime_session_id": runtime_session_id,
+                "tool_call_id": tool_call_id,
+                "execution_token": execution_token,
+                "expected_run_version": int(expected_run_version),
+                "expected_valid_actions_signature": expected_valid_actions_signature,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def agent_tool_heartbeat(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        tool_call_id: str,
+        execution_token: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/tools/heartbeat",
+            json={
+                "runtime_session_id": runtime_session_id,
+                "tool_call_id": tool_call_id,
+                "execution_token": execution_token,
+            },
+        )
+
+    async def agent_tool_result(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        tool_call_id: str,
+        execution_token: str,
+        result_status: str,
+        result_payload: dict,
+        stdout: str = "",
+        stderr: str = "",
+        stdout_truncated: bool = False,
+        stderr_truncated: bool = False,
+        stdout_sha256: str | None = None,
+        stderr_sha256: str | None = None,
+        result_submission_hash: str | None = None,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "runtime_session_id": runtime_session_id,
+            "tool_call_id": tool_call_id,
+            "execution_token": execution_token,
+            "result_status": result_status,
+            "result_payload": result_payload,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": bool(stdout_truncated),
+            "stderr_truncated": bool(stderr_truncated),
+        }
+        if stdout_sha256 is not None:
+            payload["stdout_sha256"] = stdout_sha256
+        if stderr_sha256 is not None:
+            payload["stderr_sha256"] = stderr_sha256
+        if result_submission_hash is not None:
+            payload["result_submission_hash"] = result_submission_hash
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/tools/result",
+            json=payload,
+        )
+
+    async def agent_tool_cancel(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        tool_call_id: str,
+        execution_token: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/agent/runs/{run_id}/tools/{tool_call_id}/cancel",
+            json={
+                "runtime_session_id": runtime_session_id,
+                "execution_token": execution_token,
+            },
+        )
+
+    async def ide_register_bridge(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        actor_id: str,
+        ide_type: str,
+        workspace_root: str,
+        workspace_fingerprint: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/ide/register",
+            json={
+                "run_id": run_id,
+                "runtime_session_id": runtime_session_id,
+                "actor_id": actor_id,
+                "ide_type": ide_type,
+                "workspace_root": workspace_root,
+                "workspace_fingerprint": workspace_fingerprint,
+            },
+        )
+
+    async def ide_open_file(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        path: str,
+        line: int | None = None,
+        col: int | None = None,
+    ) -> dict:
+        payload: dict = {
+            "run_id": run_id,
+            "runtime_session_id": runtime_session_id,
+            "path": path,
+        }
+        if line is not None:
+            payload["line"] = int(line)
+        if col is not None:
+            payload["col"] = int(col)
+        return await self._request("POST", "/ide/open-file", json=payload)
+
+    async def ide_run_command(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        command: str,
+        terminal_name: str | None = None,
+    ) -> dict:
+        payload: dict = {
+            "run_id": run_id,
+            "runtime_session_id": runtime_session_id,
+            "command": command,
+        }
+        if terminal_name:
+            payload["terminal_name"] = terminal_name
+        return await self._request("POST", "/ide/run-command", json=payload)
+
+    async def ide_show_diff(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+        path: str,
+        new_contents: str,
+        allow_partial_accept: bool = True,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/ide/show-diff",
+            json={
+                "run_id": run_id,
+                "runtime_session_id": runtime_session_id,
+                "path": path,
+                "new_contents": new_contents,
+                "allow_partial_accept": bool(allow_partial_accept),
+            },
+        )
+
+    async def ide_message(
+        self,
+        *,
+        request_id: str,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/ide/message",
+            json={
+                "id": request_id,
+                "type": "request",
+                "method": method,
+                "params": params,
+            },
+        )
+
+    async def ide_get_context(self, *, run_id: str, runtime_session_id: str) -> dict:
+        return await self._request(
+            "POST",
+            "/ide/context",
+            json={"run_id": run_id, "runtime_session_id": runtime_session_id},
+        )
+
+    async def stream_tool_output(
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        url = f"{self.base_url}/agent/runs/{run_id}/tools/{tool_call_id}/stream"
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=self._headers()) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
+                async for line in resp.aiter_lines():
+                    raw = (line or "").strip()
+                    if not raw.startswith("data:"):
+                        continue
+                    payload = raw[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict):
+                        yield data
+
+    async def ide_stream_events(
+        self,
+        *,
+        run_id: str,
+        runtime_session_id: str,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        url = (
+            f"{self.base_url}/ide/events/stream"
+            f"?run_id={run_id}&runtime_session_id={runtime_session_id}"
+        )
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=self._headers()) as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
+                async for line in resp.aiter_lines():
+                    raw = (line or "").strip()
+                    if not raw.startswith("data:"):
+                        continue
+                    payload = raw[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        data = json.loads(payload)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict):
+                        yield data

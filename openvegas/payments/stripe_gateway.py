@@ -10,6 +10,8 @@ from typing import Any
 class StripeGateway:
     """Thin wrapper around stripe-python primitives used by billing service."""
 
+    mode = "stripe"
+
     def __init__(self, stripe_mod: Any | None = None):
         if stripe_mod is None:
             try:
@@ -126,4 +128,3 @@ class StripeGateway:
             sig_header=signature,
             secret=os.environ["STRIPE_WEBHOOK_SECRET"],
         )
-
