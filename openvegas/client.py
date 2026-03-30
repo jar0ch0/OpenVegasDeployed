@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 import json
+import time
 from typing import Any, AsyncGenerator
 
 import httpx
 
-from openvegas.config import get_backend_url, get_bearer_token
+from openvegas.auth import (
+    AuthError as CliAuthError,
+    AuthRefreshMalformed,
+    AuthRefreshRejected,
+    AuthRefreshTimeout,
+    SupabaseAuth,
+)
+from openvegas.config import (
+    clear_persisted_refresh_token,
+    clear_session_claim_cache,
+    get_backend_url,
+    get_bearer_token,
+    get_session,
+    invalidate_session_cache,
+    token_expires_soon,
+)
+from openvegas.telemetry import emit_metric, emit_once_process
 
 
 class APIError(Exception):
@@ -25,6 +43,13 @@ class OpenVegasClient:
     def __init__(self):
         self.base_url = get_backend_url()
         self.token = get_bearer_token()
+        self._session_snapshot = get_session()
+        self._wallet_bootstrap_done = False
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_inflight: asyncio.Task[str] | None = None
+        self._proactive_fail_last_ts = 0.0
+        self._proactive_fail_cooldown_sec = 60.0
+        self._emit_startup_auth_mode_once()
 
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}
@@ -32,38 +57,162 @@ class OpenVegasClient:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict:
+    def _emit_startup_auth_mode_once(self) -> None:
+        refresh_storage = str(self._session_snapshot.get("refresh_storage", "unknown") or "unknown")
+        access_present = "1" if str(self._session_snapshot.get("access_token", "")).strip() else "0"
+        near_expiry = "1" if token_expires_soon(self._session_snapshot, leeway_sec=300) else "0"
+        emit_once_process(
+            "auth_cli_bootstrap_state_total",
+            {
+                "refresh_storage": refresh_storage,
+                "access_present": access_present,
+                "near_expiry": near_expiry,
+            },
+        )
+
+    def _allow_preflight_failure_metric(self) -> bool:
+        now = time.monotonic()
+        if (now - self._proactive_fail_last_ts) < self._proactive_fail_cooldown_sec:
+            return False
+        self._proactive_fail_last_ts = now
+        return True
+
+    def _invalidate_session_cache(self, reason: str) -> None:
+        self.token = None
+        clear_session_claim_cache()
+        invalidate_session_cache()
+        if reason == "refresh_rejected":
+            clear_persisted_refresh_token()
+        self._session_snapshot = get_session()
+
+    async def _refresh_once(self, trigger: str) -> str:
+        try:
+            token = await asyncio.to_thread(lambda: SupabaseAuth().refresh_token())
+        except AuthRefreshTimeout as e:
+            emit_metric(
+                "auth_refresh_attempt_total",
+                {"surface": "cli", "trigger": trigger, "outcome": "failure", "reason": "refresh_timeout"},
+            )
+            raise TimeoutError("refresh_timeout") from e
+        except AuthRefreshMalformed as e:
+            emit_metric(
+                "auth_refresh_attempt_total",
+                {"surface": "cli", "trigger": trigger, "outcome": "failure", "reason": "refresh_malformed"},
+            )
+            raise ValueError("refresh_malformed") from e
+        except (AuthRefreshRejected, CliAuthError) as e:
+            emit_metric(
+                "auth_refresh_attempt_total",
+                {"surface": "cli", "trigger": trigger, "outcome": "failure", "reason": "refresh_rejected"},
+            )
+            raise CliAuthError("refresh_rejected") from e
+        except Exception as e:
+            emit_metric(
+                "auth_refresh_attempt_total",
+                {"surface": "cli", "trigger": trigger, "outcome": "failure", "reason": "refresh_rejected"},
+            )
+            raise CliAuthError("refresh_rejected") from e
+
+        self.token = str(token or "").strip() or None
+        self._session_snapshot = get_session()
+        emit_metric("auth_refresh_attempt_total", {"surface": "cli", "trigger": trigger, "outcome": "success"})
+        return str(self.token or "")
+
+    async def _refresh_single_flight(self, trigger: str) -> str:
+        if self._refresh_inflight and not self._refresh_inflight.done():
+            return await self._refresh_inflight
+        async with self._refresh_lock:
+            if self._refresh_inflight and not self._refresh_inflight.done():
+                return await self._refresh_inflight
+            self._refresh_inflight = asyncio.create_task(self._refresh_once(trigger))
+        try:
+            return await self._refresh_inflight
+        finally:
+            if self._refresh_inflight and self._refresh_inflight.done():
+                self._refresh_inflight = None
+
+    async def _do_http(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.request(
+                return await client.request(
                     method,
                     f"{self.base_url}{path}",
                     headers=self._headers(),
                     **kwargs,
                 )
-                if resp.status_code >= 400:
-                    detail = resp.text
-                    data: dict | None = None
-                    try:
-                        body = resp.json()
-                        if isinstance(body, dict):
-                            data = body
-                            detail = body.get("detail") or body.get("error") or resp.text
-                    except Exception:
-                        pass
-                    raise APIError(resp.status_code, detail, data=data)
-                return resp.json()
         except httpx.HTTPError as e:
             raise APIError(
                 503,
                 f"Backend request failed: {type(e).__name__}. Check server is running and reachable at {self.base_url}.",
             ) from e
 
+    @staticmethod
+    def _parse_or_raise(resp: httpx.Response) -> dict:
+        if resp.status_code >= 400:
+            detail = resp.text
+            data: dict | None = None
+            try:
+                body = resp.json()
+                if isinstance(body, dict):
+                    data = body
+                    detail = body.get("detail") or body.get("error") or resp.text
+            except Exception:
+                pass
+            raise APIError(resp.status_code, detail, data=data)
+        body = resp.json()
+        if isinstance(body, dict):
+            return body
+        return {"data": body}
+
+    async def _request(self, method: str, path: str, **kwargs) -> dict:
+        if token_expires_soon(self._session_snapshot, leeway_sec=300):
+            try:
+                await self._refresh_single_flight(trigger="proactive")
+            except Exception:
+                if self._allow_preflight_failure_metric():
+                    emit_metric(
+                        "auth_refresh_attempt_total",
+                        {
+                            "surface": "cli",
+                            "trigger": "proactive",
+                            "outcome": "failure",
+                            "reason": "refresh_preflight_failed",
+                        },
+                    )
+
+        resp = await self._do_http(method, path, **kwargs)
+        if resp.status_code in (401, 403):
+            try:
+                await self._refresh_single_flight(trigger="retry_401")
+            except TimeoutError:
+                self._invalidate_session_cache("refresh_timeout")
+                raise APIError(401, "Session refresh timed out. Run: openvegas login")
+            except ValueError:
+                self._invalidate_session_cache("refresh_malformed")
+                raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
+            except CliAuthError:
+                self._invalidate_session_cache("refresh_rejected")
+                raise APIError(401, "Session expired. Run: openvegas login")
+            resp = await self._do_http(method, path, **kwargs)
+        return self._parse_or_raise(resp)
+
+    async def _ensure_wallet_bootstrap(self) -> None:
+        if self._wallet_bootstrap_done:
+            return
+        await self._request("POST", "/wallet/bootstrap")
+        self._wallet_bootstrap_done = True
+
     async def get_balance(self) -> dict:
+        await self._ensure_wallet_bootstrap()
         return await self._request("GET", "/wallet/balance")
 
     async def get_history(self) -> dict:
+        await self._ensure_wallet_bootstrap()
         return await self._request("GET", "/wallet/history")
+
+    async def get_billing_activity(self, limit: int = 50) -> dict:
+        await self._ensure_wallet_bootstrap()
+        return await self._request("GET", f"/billing/activity?limit={int(limit)}")
 
     async def create_mint_challenge(
         self, amount_usd: float, provider: str, mode: str
@@ -202,6 +351,13 @@ class OpenVegasClient:
             payload["idempotency_key"] = idempotency_key
         return await self._request("POST", "/billing/topups/checkout", json=payload)
 
+    async def preview_topup_checkout(self, amount_usd: Decimal | str) -> dict:
+        return await self._request(
+            "POST",
+            "/billing/topups/preview",
+            json={"amount_usd": str(amount_usd)},
+        )
+
     async def suggest_topup(self, suggested_topup_usd: Decimal | str | None = None) -> dict:
         payload: dict[str, str] = {}
         if suggested_topup_usd is not None:
@@ -305,6 +461,150 @@ class OpenVegasClient:
                 "wager_v": float(Decimal(str(wager_v))),
                 "idempotency_key": idempotency_key,
             },
+        )
+
+    async def agent_start_session(self, *, envelope_v: Decimal | str) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/sessions/start",
+            json={"envelope_v": str(Decimal(str(envelope_v)))},
+        )
+
+    async def agent_get_budget(self, *, session_id: str) -> dict:
+        return await self._request("GET", "/v1/agent/budget", params={"session_id": session_id})
+
+    async def agent_infer(
+        self,
+        *,
+        session_id: str,
+        prompt: str,
+        provider: str,
+        model: str,
+        max_tokens: int = 1024,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/infer",
+            json={
+                "session_id": session_id,
+                "prompt": prompt,
+                "provider": provider,
+                "model": model,
+                "max_tokens": int(max_tokens),
+            },
+        )
+
+    async def agent_boost_challenge(self, *, session_id: str) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/boost/challenge",
+            json={"session_id": session_id},
+        )
+
+    async def agent_boost_submit(self, *, challenge_id: str, artifact_text: str) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/boost/submit",
+            json={"challenge_id": challenge_id, "artifact_text": artifact_text},
+        )
+
+    async def agent_casino_start_session(
+        self,
+        *,
+        agent_session_id: str,
+        max_loss_v: Decimal | str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/casino/sessions/start",
+            json={
+                "agent_session_id": agent_session_id,
+                "max_loss_v": float(Decimal(str(max_loss_v))),
+            },
+        )
+
+    async def agent_casino_list_games(self) -> dict:
+        return await self._request("GET", "/v1/agent/casino/games")
+
+    async def agent_casino_start_round(
+        self,
+        *,
+        casino_session_id: str,
+        game_code: str,
+        wager_v: Decimal | str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/v1/agent/casino/rounds/start",
+            json={
+                "casino_session_id": casino_session_id,
+                "game_code": game_code,
+                "wager_v": float(Decimal(str(wager_v))),
+            },
+        )
+
+    async def agent_casino_action(
+        self,
+        *,
+        round_id: str,
+        action: str,
+        payload: dict | None = None,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/v1/agent/casino/rounds/{round_id}/action",
+            json={
+                "action": action,
+                "payload": payload or {},
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def agent_casino_resolve(self, *, round_id: str) -> dict:
+        return await self._request("POST", f"/v1/agent/casino/rounds/{round_id}/resolve", json={})
+
+    async def agent_casino_verify(self, *, round_id: str) -> dict:
+        return await self._request("GET", f"/v1/agent/casino/rounds/{round_id}/verify")
+
+    async def agent_casino_get_session(self, *, session_id: str) -> dict:
+        return await self._request("GET", f"/v1/agent/casino/sessions/{session_id}")
+
+    async def agent_admin_create_account(self, *, org_id: str, name: str) -> dict:
+        return await self._request(
+            "POST",
+            f"/v1/agent/admin/orgs/{org_id}/accounts",
+            json={"name": name},
+        )
+
+    async def agent_admin_list_accounts(self, *, org_id: str) -> dict:
+        return await self._request("GET", f"/v1/agent/admin/orgs/{org_id}/accounts")
+
+    async def agent_admin_issue_token(
+        self,
+        *,
+        org_id: str,
+        agent_account_id: str,
+        scopes: list[str],
+        ttl_minutes: int = 60,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/v1/agent/admin/orgs/{org_id}/accounts/{agent_account_id}/tokens",
+            json={"scopes": scopes, "ttl_minutes": int(ttl_minutes)},
+        )
+
+    async def agent_admin_get_policy(self, *, org_id: str) -> dict:
+        return await self._request("GET", f"/v1/agent/admin/orgs/{org_id}/policies")
+
+    async def agent_admin_set_policy(self, *, org_id: str, fields: dict[str, Any]) -> dict:
+        return await self._request("PATCH", f"/v1/agent/admin/orgs/{org_id}/policies", json=fields)
+
+    async def agent_admin_get_audit(self, *, org_id: str, limit: int = 50) -> dict:
+        return await self._request(
+            "GET",
+            f"/v1/agent/admin/orgs/{org_id}/audit",
+            params={"limit": int(limit)},
         )
 
     async def agent_run_create(

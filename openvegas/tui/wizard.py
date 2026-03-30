@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
+import webbrowser
+from urllib.parse import urlparse
 
 from textual.app import App, ComposeResult
 from textual.containers import Container
@@ -18,6 +20,20 @@ from openvegas.tui.wizard_state import (
     validate_inputs,
     visible_fields_for_state,
 )
+
+
+def _is_simulated_checkout_url(url: str) -> bool:
+    try:
+        return urlparse(str(url or "")).netloc.lower() == "checkout.openvegas.local"
+    except Exception:
+        return False
+
+
+def _format_v_amount(value: object) -> str:
+    try:
+        return f"{Decimal(str(value)).quantize(Decimal('0.01'))}"
+    except Exception:
+        return "0.00"
 
 
 class OpenVegasWizard(App):
@@ -71,9 +87,7 @@ class OpenVegasWizard(App):
                     yield RadioButton("History")
                     yield RadioButton("Deposit")
                     yield RadioButton("Play")
-                    yield RadioButton("Play (Demo Win)")
                     yield RadioButton("Verify")
-                    yield RadioButton("Verify (Demo)")
 
             with Container(id="panel_game", classes="panel"):
                 yield Static("Select game")
@@ -289,42 +303,68 @@ class OpenVegasWizard(App):
 
         if action == "Balance":
             data = await self.client.get_balance()
-            self._set_output(f"Balance: {data.get('balance', '0')} $V")
+            self._set_output(f"Balance: {_format_v_amount(data.get('balance', '0'))} $V")
             return
 
         if action == "History":
-            data = await self.client.get_history()
+            data = await self.client.get_billing_activity()
             entries = data.get("entries", [])
             if not entries:
                 self._set_output("No transactions yet.")
                 return
-            summary = "\n".join(
-                f"{e.get('entry_type')} {e.get('amount')} ref={str(e.get('reference_id',''))[:12]}"
-                for e in entries[:8]
-            )
+            lines: list[str] = []
+            for e in entries[:8]:
+                kind = str(e.get("type") or e.get("entry_type") or "")
+                status = str(e.get("status") or "")
+                if kind == "gameplay":
+                    amount = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
+                    amount_label = f"{amount} $V"
+                else:
+                    usd = str(e.get("amount_usd") or "0.00")
+                    amount_v = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
+                    amount_label = f"${usd} · +{amount_v} $V"
+                lines.append(
+                    f"{kind} {amount_label} {status} ref={str(e.get('reference_id', ''))[:12]}".strip()
+                )
+            summary = "\n".join(lines)
             self._set_output(summary)
             return
 
         if action == "Deposit":
             data = await self.client.create_topup_checkout(Decimal(self.state.amount))
+            checkout_url = str(data.get("checkout_url") or "")
+            target_url = checkout_url
+            auto_open_message = "Checkout URL not available."
+            if checkout_url:
+                if _is_simulated_checkout_url(checkout_url):
+                    target_url = f"{str(self.client.base_url).rstrip('/')}/ui/payments"
+                try:
+                    opened = webbrowser.open(target_url, new=2)
+                except Exception:
+                    opened = False
+                auto_open_message = (
+                    f"Opened browser: {target_url}"
+                    if opened
+                    else f"Open manually: {target_url}"
+                )
+                if _is_simulated_checkout_url(checkout_url):
+                    auto_open_message += " (simulated checkout URL detected)"
             self._set_output(
                 f"Top-up ID: {data.get('topup_id')}\n"
                 f"Status: {data.get('status')}\n"
-                f"Checkout URL: {data.get('checkout_url')}"
+                f"Checkout URL: {checkout_url}\n"
+                f"{auto_open_message}"
             )
             return
 
-        if action in {"Play", "Play (Demo Win)"}:
+        if action == "Play":
             stake = Decimal(self.state.amount)
             payload: dict = {"amount": float(stake)}
             if self.state.game == "horse":
                 payload["horse"] = int(self.state.horse)
                 payload["type"] = self.state.bet_type
 
-            if action == "Play (Demo Win)":
-                data = await self.client.play_game_demo(self.state.game, payload)
-            else:
-                data = await self.client.play_game(self.state.game, payload)
+            data = await self.client.play_game(self.state.game, payload)
 
             renderer_cls = self._renderer_for(self.state.game)
             if renderer_cls is not None:
@@ -333,12 +373,8 @@ class OpenVegasWizard(App):
             if Decimal(str(data.get("net", "0"))) > 0 and load_config().get("animation", True):
                 await self._render_confetti()
 
-            mode = "DEMO MODE (canonical: false)" if data.get("demo_mode") else "LIVE MODE"
-            verify_hint = (
-                f"openvegas verify {data.get('game_id')} --demo"
-                if data.get("demo_mode")
-                else f"openvegas verify {data.get('game_id')}"
-            )
+            mode = "LIVE MODE"
+            verify_hint = f"openvegas verify {data.get('game_id')}"
             self._set_output(
                 f"{mode}\n"
                 f"Payout: {data.get('payout')} | Net: {data.get('net')}\n"
@@ -347,20 +383,12 @@ class OpenVegasWizard(App):
             )
             return
 
-        if action in {"Verify", "Verify (Demo)"}:
-            if action == "Verify (Demo)":
-                data = await self.client.verify_demo_game(self.state.game_id)
-                self._set_output(
-                    f"DEMO VERIFY\n"
-                    f"canonical: {data.get('canonical')}\n"
-                    f"server_seed_hash: {str(data.get('server_seed_hash',''))[:20]}..."
-                )
-            else:
-                data = await self.client.verify_game(self.state.game_id)
-                self._set_output(
-                    "Outcome verified payload received.\n"
-                    f"server_seed_hash: {str(data.get('server_seed_hash',''))[:20]}..."
-                )
+        if action == "Verify":
+            data = await self.client.verify_game(self.state.game_id)
+            self._set_output(
+                "Outcome verified payload received.\n"
+                f"server_seed_hash: {str(data.get('server_seed_hash',''))[:20]}..."
+            )
             return
 
         self._set_output(f"Unknown action: {action}")

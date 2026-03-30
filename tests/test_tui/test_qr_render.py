@@ -16,3 +16,12 @@ def test_qr_half_block_emits_unicode_blocks():
     out = qr_half_block("https://example.com/topup/123")
     assert out
     assert any(ch in out for ch in ("█", "▀", "▄"))
+
+
+def test_qr_render_raises_runtime_reason_when_dependency_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "openvegas.tui.qr_render.ensure_qrcode_available",
+        lambda: (False, "qrcode missing in active runtime"),
+    )
+    with pytest.raises(RuntimeError, match="qrcode missing in active runtime"):
+        qr_width("https://example.com/topup/123")

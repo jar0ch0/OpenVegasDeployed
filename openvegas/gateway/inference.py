@@ -627,9 +627,19 @@ class AIGateway:
         import openai
 
         client = openai.AsyncOpenAI(api_key=api_key)
+        if self._prefers_openai_responses_api(req.model):
+            return await self._call_openai_responses(client=client, req=req)
+        return await self._call_openai_chat_completions(client=client, req=req)
+
+    async def _call_openai_chat_completions(
+        self,
+        *,
+        client: Any,
+        req: InferenceRequest,
+    ) -> InferenceResult:
         kwargs: dict[str, Any] = {
             "model": req.model,
-            "max_tokens": req.max_tokens,
+            "max_completion_tokens": req.max_tokens,
             "messages": req.messages,
         }
         if req.enable_tools:
@@ -648,6 +658,8 @@ class AIGateway:
                                         "Read",
                                         "Search",
                                         "Write",
+                                        "FindAndReplace",
+                                        "InsertAtEnd",
                                         "Bash",
                                         "List",
                                     ],
@@ -662,7 +674,29 @@ class AIGateway:
                 }
             ]
             kwargs["tool_choice"] = "auto"
-        resp = await client.chat.completions.create(**kwargs)
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            # Some models/sdks only accept max_tokens while others require max_completion_tokens.
+            if "Unsupported parameter" in msg and "'max_completion_tokens'" in msg:
+                retry = dict(kwargs)
+                retry.pop("max_completion_tokens", None)
+                retry["max_tokens"] = req.max_tokens
+                try:
+                    resp = await client.chat.completions.create(**retry)
+                except Exception as retry_exc:
+                    self._raise_openai_request_error(retry_exc)
+            elif "Unsupported parameter" in msg and "'max_tokens'" in msg:
+                retry = dict(kwargs)
+                retry.pop("max_tokens", None)
+                retry["max_completion_tokens"] = req.max_tokens
+                try:
+                    resp = await client.chat.completions.create(**retry)
+                except Exception as retry_exc:
+                    self._raise_openai_request_error(retry_exc)
+            else:
+                self._raise_openai_request_error(exc)
         msg = resp.choices[0].message
         parsed_tool_calls: list[dict[str, Any]] = []
         if req.enable_tools and getattr(msg, "tool_calls", None):
@@ -670,28 +704,12 @@ class AIGateway:
                 fn = getattr(tc, "function", None)
                 if not fn:
                     continue
-                try:
-                    args = json.loads(getattr(fn, "arguments", "") or "{}")
-                except Exception:
-                    args = {}
-                if not isinstance(args, dict):
-                    args = {}
-                tool_name = str(args.get("tool_name") or getattr(fn, "name", "") or "")
-                if not tool_name:
-                    continue
-                args_obj = args.get("arguments", {}) if isinstance(args.get("arguments"), dict) else {}
-                if not args_obj:
-                    args_obj = {
-                        k: v for k, v in args.items() if k not in {"tool_name", "shell_mode", "timeout_sec"}
-                    }
-                parsed_tool_calls.append(
-                    {
-                        "tool_name": tool_name,
-                        "arguments": args_obj if isinstance(args_obj, dict) else {},
-                        "shell_mode": str(args.get("shell_mode") or "read_only"),
-                        "timeout_sec": int(args.get("timeout_sec") or 30),
-                    }
+                parsed = self._parse_local_tool_call(
+                    function_name=str(getattr(fn, "name", "") or ""),
+                    raw_arguments=str(getattr(fn, "arguments", "") or ""),
                 )
+                if parsed:
+                    parsed_tool_calls.append(parsed)
         return InferenceResult(
             text=msg.content or "",
             input_tokens=int(getattr(resp.usage, "prompt_tokens", 0) or 0),
@@ -699,6 +717,154 @@ class AIGateway:
             provider_request_id=getattr(resp, "id", None),
             tool_calls=parsed_tool_calls or None,
         )
+
+    async def _call_openai_responses(self, *, client: Any, req: InferenceRequest) -> InferenceResult:
+        kwargs: dict[str, Any] = {
+            "model": req.model,
+            "input": self._messages_to_openai_responses_input(req.messages),
+            "max_output_tokens": req.max_tokens,
+        }
+        if req.enable_tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "name": "call_local_tool",
+                    "description": "Request local workspace tool execution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {
+                                "type": "string",
+                                "enum": [
+                                    "Read",
+                                    "Search",
+                                    "Write",
+                                    "FindAndReplace",
+                                    "InsertAtEnd",
+                                    "Bash",
+                                    "List",
+                                ],
+                            },
+                            "arguments": {"type": "object"},
+                            "shell_mode": {"type": "string", "enum": ["read_only", "mutating"]},
+                            "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 300},
+                        },
+                        "required": ["tool_name", "arguments"],
+                    },
+                }
+            ]
+            kwargs["tool_choice"] = "auto"
+
+        try:
+            resp = await client.responses.create(**kwargs)
+        except Exception as exc:
+            self._raise_openai_request_error(exc)
+        parsed_tool_calls: list[dict[str, Any]] = []
+        if req.enable_tools:
+            for item in list(getattr(resp, "output", []) or []):
+                if str(getattr(item, "type", "")) != "function_call":
+                    continue
+                fn_name = str(getattr(item, "name", "") or "")
+                raw_args = str(getattr(item, "arguments", "") or "")
+                parsed = self._parse_local_tool_call(
+                    function_name=fn_name,
+                    raw_arguments=raw_args,
+                )
+                if parsed:
+                    parsed_tool_calls.append(parsed)
+
+        usage = getattr(resp, "usage", None)
+        return InferenceResult(
+            text=self._extract_openai_responses_text(resp),
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            provider_request_id=getattr(resp, "id", None),
+            tool_calls=parsed_tool_calls or None,
+        )
+
+    @staticmethod
+    def _prefers_openai_responses_api(model_id: str) -> bool:
+        m = str(model_id or "").strip().lower()
+        # GPT-5 and Codex-family models use the Responses API.
+        return m.startswith("gpt-5") or ("codex" in m)
+
+    @staticmethod
+    def _messages_to_openai_responses_input(messages: list[dict]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for msg in messages:
+            role = str((msg or {}).get("role") or "user")
+            content = (msg or {}).get("content", "")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if str(part.get("type", "")).lower() in {"text", "input_text", "output_text"}:
+                        value = part.get("text", "")
+                        if value:
+                            parts.append(str(value))
+                text = "\n".join(parts)
+            elif content is not None:
+                text = str(content)
+            out.append({"role": role, "content": [{"type": "input_text", "text": text}]})
+        return out
+
+    @staticmethod
+    def _parse_local_tool_call(*, function_name: str, raw_arguments: str) -> dict[str, Any] | None:
+        try:
+            args = json.loads(raw_arguments or "{}")
+        except Exception:
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        tool_name = str(args.get("tool_name") or "").strip()
+        if not tool_name and function_name and function_name != "call_local_tool":
+            tool_name = function_name
+        if not tool_name:
+            return None
+        args_obj = args.get("arguments", {}) if isinstance(args.get("arguments"), dict) else {}
+        if not args_obj:
+            args_obj = {k: v for k, v in args.items() if k not in {"tool_name", "shell_mode", "timeout_sec"}}
+        return {
+            "tool_name": tool_name,
+            "arguments": args_obj if isinstance(args_obj, dict) else {},
+            "shell_mode": str(args.get("shell_mode") or "read_only"),
+            "timeout_sec": int(args.get("timeout_sec") or 30),
+        }
+
+    @staticmethod
+    def _extract_openai_responses_text(resp: Any) -> str:
+        out_text = str(getattr(resp, "output_text", "") or "").strip()
+        if out_text:
+            return out_text
+        chunks: list[str] = []
+        for item in list(getattr(resp, "output", []) or []):
+            if str(getattr(item, "type", "")).lower() != "message":
+                continue
+            for part in list(getattr(item, "content", []) or []):
+                if str(getattr(part, "type", "")).lower() in {"text", "output_text"}:
+                    value = getattr(part, "text", "")
+                    if value:
+                        chunks.append(str(value))
+        return "\n".join(chunks).strip()
+
+    @staticmethod
+    def _raise_openai_request_error(exc: Exception) -> None:
+        msg = str(exc or "").strip()
+        detail = msg if len(msg) <= 500 else msg[:500]
+        lowered = detail.lower()
+        if "invalid_request_error" in lowered or "unsupported parameter" in lowered or "badrequesterror" in lowered:
+            raise ContractError(
+                APIErrorCode.INVALID_TRANSITION,
+                f"OpenAI request rejected: {detail}",
+            ) from exc
+        raise ContractError(
+            APIErrorCode.PROVIDER_UNAVAILABLE,
+            f"OpenAI request failed: {detail}",
+        ) from exc
 
     async def _call_gemini(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         import google.generativeai as genai

@@ -39,8 +39,13 @@ def test_required_fields_block_run():
     state = WizardState(action="Deposit", amount="0")
     assert validate_inputs(state) == "Amount must be greater than 0."
 
-    state = WizardState(action="Play", game="horse", amount="1", horse="")
+    state = WizardState(action="Play", game="horse", amount="50", horse="")
     assert validate_inputs(state) == "Horse number is required for horse play."
+
+
+def test_play_stake_minimum_enforced():
+    state = WizardState(action="Play", game="skillshot", amount="1")
+    assert "at least" in str(validate_inputs(state)).lower()
 
 
 def test_back_next_preserves_entered_values():
@@ -65,7 +70,7 @@ def test_action_switch_hides_fields_without_validation_noise_and_restores_values
         action="Play",
         game="horse",
         bet_type="place",
-        amount="3",
+        amount="50",
         horse="not-an-int",  # invalid for Play, but should be ignored once hidden
     )
 
@@ -77,6 +82,6 @@ def test_action_switch_hides_fields_without_validation_noise_and_restores_values
     assert validate_inputs(state) is None
 
     state.action = "Play"
-    assert state.amount == "3"
+    assert state.amount == "50"
     assert state.bet_type == "place"
     assert state.horse == "not-an-int"

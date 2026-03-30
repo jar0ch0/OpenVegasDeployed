@@ -7,10 +7,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/ui/assets/theme.css" />
-    <link rel="stylesheet" href="/ui/assets/layout.css" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
     <style>
-      .checkout-link { word-break: break-all; color: var(--aqua); }
       .pay-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
       @media (max-width: 920px){ .pay-grid { grid-template-columns: 1fr; } }
     </style>
@@ -19,8 +19,9 @@
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"></div>
+        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
         <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
     </nav>
 
@@ -28,119 +29,37 @@
       <header class="page-hero">
         <div>
           <div class="text-mono-xs" style="margin-bottom:1rem">PAYMENTS</div>
-          <h1 class="page-title">Funding flows built for AI usage.</h1>
+          <h1 class="page-title">Choose a payment flow.</h1>
         </div>
-        <p class="text-mono-sm page-lead">OpenVegas makes it easier to add funds, review payment state, and move from one-off checkout events to a more continuous operating balance.</p>
+        <p class="text-mono-sm page-lead">Top-up and monthly subscription are now separate pages.</p>
       </header>
 
-      <section id="authState" class="auth-state" hidden>
-        <div class="text-mono-xs">AUTH REQUIRED</div>
-        <h2 class="card-title">Sign in to view payment data</h2>
-        <p class="text-mono-sm">This page is available after authentication.</p>
-        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fpayments">OpenVegas login</a></div>
-      </section>
+      <section class="pay-grid">
+        <article class="card">
+          <div class="text-mono-xs">ONE-TIME</div>
+          <h2 class="card-title">Top-up checkout</h2>
+          <p class="card-copy">Create a one-time payment and add funds immediately after settlement.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="/ui/topup-checkout">Open top-up page</a>
+          </div>
+        </article>
 
-      <section id="authContent" hidden>
-        <div class="section-grid-3" style="border-top: none; margin-bottom: 12px;">
-          <article class="card border-r">
-            <div class="tag">FAST TOP-UP</div>
-            <h2 class="card-title">Quickly add funds and return to active usage</h2>
-          </article>
-          <article class="card border-r">
-            <div class="tag">RECURRING SUPPORT</div>
-            <h2 class="card-title">Set up predictable replenishment for recurring demand</h2>
-          </article>
-          <article class="card">
-            <div class="tag">OPERATIONAL VISIBILITY</div>
-            <h2 class="card-title">Track status, failures, and follow-up states in one place</h2>
-          </article>
-        </div>
-
-        <div class="pay-grid">
-          <article class="card">
-            <div class="text-mono-xs">CHECKOUT</div>
-            <h2 class="card-title">Create top-up checkout</h2>
-            <div class="cta-row">
-              <button id="createCheckout" class="btn btn-primary">Create $20 checkout</button>
-            </div>
-            <p id="checkoutMeta" class="text-mono-sm" style="margin-top:.8rem;">No checkout yet.</p>
-            <a id="checkoutUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
-          </article>
-
-          <article class="card">
-            <div class="text-mono-xs">SUGGESTION</div>
-            <h2 class="card-title">Request top-up suggestion</h2>
-            <div class="cta-row">
-              <button id="checkSuggest" class="btn">Run suggest check</button>
-            </div>
-            <pre id="suggestOut" class="text-mono-sm" style="margin-top:.8rem; white-space:pre-wrap;">No suggestion check yet.</pre>
-          </article>
-        </div>
+        <article class="card">
+          <div class="text-mono-xs">RECURRING</div>
+          <h2 class="card-title">Monthly subscription</h2>
+          <p class="card-copy">Start, manage, or cancel personal monthly recurring billing.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="/ui/subscription">Open subscription page</a>
+          </div>
+        </article>
       </section>
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js";
-      import { apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js";
-
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20260330";
       installAssetGuard();
       renderTopNav("siteNav");
       renderFounderLinks("founderLinks");
-
-      const loginLink = byId("loginLink");
-      if (loginLink) loginLink.href = getLoginHref("/ui/payments");
-
-      try {
-        const probe = await authProbe();
-        if (!probe.ok) {
-          showSignedOutPanel();
-        } else {
-          showAuthedContent();
-
-          byId("createCheckout")?.addEventListener("click", async () => {
-            const out = byId("checkoutMeta");
-            const link = byId("checkoutUrl");
-            out.textContent = "creating...";
-            try {
-              const data = await apiJson("/billing/topups/checkout", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ amount_usd: "20.00" }),
-              });
-              out.textContent = `topup_id=${data.topup_id} status=${data.status}`;
-              if (data.checkout_url) {
-                link.hidden = false;
-                link.href = data.checkout_url;
-                link.textContent = data.checkout_url;
-              }
-              if (data.topup_id) {
-                out.insertAdjacentHTML("beforeend", ` · <a class="checkout-link" href="/ui/topup/${data.topup_id}">open status page</a>`);
-              }
-            } catch (err) {
-              out.textContent = String(err);
-            }
-          });
-
-          byId("checkSuggest")?.addEventListener("click", async () => {
-            const out = byId("suggestOut");
-            out.textContent = "checking...";
-            try {
-              const data = await apiJson("/billing/topups/suggest", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ suggested_topup_usd: "20.00" }),
-              });
-              out.textContent = JSON.stringify(data, null, 2);
-            } catch (err) {
-              out.textContent = String(err);
-            }
-          });
-        }
-      } catch (err) {
-        showSignedOutPanel();
-        const panel = byId("authState");
-        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
-      }
     </script>
   </body>
 </html>

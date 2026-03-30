@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Checkout Canceled</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+    </nav>
+
+    <main class="container page-shell">
+      <section class="card">
+        <div class="text-mono-xs">PAYMENT STATUS</div>
+        <h1 class="page-title">Checkout canceled</h1>
+        <p class="text-mono-sm page-lead">
+          No funds were added. You can retry with a different amount or payment method.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="/ui/topup-checkout">Retry payment</a>
+          <a class="btn" href="/ui/balance">Open balance</a>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, installAssetGuard } from "/ui/assets/site.js?v=20260330";
+      installAssetGuard();
+      renderTopNav("siteNav");
+    </script>
+  </body>
+</html>

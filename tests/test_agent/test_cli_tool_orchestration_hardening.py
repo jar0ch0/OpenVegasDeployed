@@ -66,7 +66,7 @@ def test_write_patch_failure_has_regen_retry_path():
     assert "regen_args = dict(regen.get(\"arguments\", {}))" in src
     assert "_validate_patch_recovery_scope(" in src
     assert "patch_recovery_scope_expansion" in src
-    assert "return await _force_finalize(tool_observations, reason=terminal_reason)" in src
+    assert "if await _finalize_or_continue_with_intercept(" in src
 
 
 def test_fs_apply_patch_patch_recovery_from_alias_payload():
@@ -115,10 +115,13 @@ def test_fs_search_pattern_recovery_from_alias_and_user_quoted_text():
 
 def test_write_existing_path_invokes_show_diff_before_propose():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
-    assert "client.ide_show_diff(" in src
+    assert "client.ide_message(" in src
+    assert "method=\"show_diff_interactive\"" in src
     assert "write_meta.get(\"existing_file\")" in src
     assert "bridge_caps.get(\"connected\")" in src
     assert "tool_show_diff_skipped_total" in src
+    assert "is_valid_show_diff_payload(" in src
+    assert "tool_diff_fallback_total" in src
 
 
 def test_noop_preprocess_path_force_finalizes_completed():
@@ -134,6 +137,15 @@ def test_completion_gate_and_stall_reasoning_are_present():
     assert "_continue_or_finalize_for_completion(" in src
     assert "completion_criteria_unmet_after_retries" in src
     assert "workflow_stalled_no_new_observations" in src
+    assert "if did_any_execution:" in src
+    assert "reason_if_finalize=\"completed\"" in src
+
+
+def test_duplicate_append_same_payload_block_guard_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "duplicate_append_same_payload_blocked" in src
+    assert "duplicate_mutation_block_total" in src
+    assert "successful_append_payload_fingerprints" in src
 
 
 def test_active_mutation_wait_refresh_and_timeout_reason_present():

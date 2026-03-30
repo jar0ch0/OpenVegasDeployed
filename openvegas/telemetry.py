@@ -13,6 +13,7 @@ from typing import DefaultDict
 
 _LOCK = Lock()
 _COUNTERS: DefaultDict[str, int] = defaultdict(int)
+_EMITTED_ONCE_KEYS: set[str] = set()
 
 
 def _key(name: str, tags: dict[str, object] | None = None) -> str:
@@ -26,6 +27,16 @@ def emit_metric(name: str, tags: dict[str, object] | None = None, value: int = 1
     """Increment a counter-style metric."""
     metric_key = _key(str(name), tags)
     with _LOCK:
+        _COUNTERS[metric_key] += int(value)
+
+
+def emit_once_process(name: str, tags: dict[str, object] | None = None, value: int = 1) -> None:
+    """Emit a metric once per-process for a stable name+tag key."""
+    metric_key = _key(str(name), tags)
+    with _LOCK:
+        if metric_key in _EMITTED_ONCE_KEYS:
+            return
+        _EMITTED_ONCE_KEYS.add(metric_key)
         _COUNTERS[metric_key] += int(value)
 
 
@@ -87,3 +98,10 @@ def get_dashboard_slices() -> dict[str, object]:
 def reset_metrics() -> None:
     with _LOCK:
         _COUNTERS.clear()
+        _EMITTED_ONCE_KEYS.clear()
+
+
+def _reset_emit_once_cache_for_tests() -> None:
+    """Test-only helper to keep emit-once assertions order independent."""
+    with _LOCK:
+        _EMITTED_ONCE_KEYS.clear()

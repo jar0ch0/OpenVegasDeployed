@@ -45,7 +45,7 @@ def test_play_win_uses_shared_result_panel(monkeypatch):
     monkeypatch.setattr("openvegas.cli.load_config", lambda: {"animation": True})
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["play", "skillshot", "--stake", "1", "--no-render"])
+    result = runner.invoke(cli, ["play", "skillshot", "--stake", "50", "--no-render"])
 
     assert result.exit_code == 0
     assert calls["is_win"] is True
@@ -68,7 +68,7 @@ def test_play_loss_uses_plain_result_panel_path(monkeypatch):
     monkeypatch.setattr("openvegas.cli.load_config", lambda: {"animation": True})
 
     runner = CliRunner()
-    result = runner.invoke(cli, ["play", "skillshot", "--stake", "1", "--no-render"])
+    result = runner.invoke(cli, ["play", "skillshot", "--stake", "50", "--no-render"])
 
     assert result.exit_code == 0
     assert calls["is_win"] is False

@@ -154,6 +154,30 @@ class _FakeBillingService:
             raise payment_routes.NotFoundError("Top-up not found")
         return self._format(t)
 
+    async def list_topup_history(self, *, user_id: str, limit: int = 50) -> dict:
+        rows = [
+            t for t in self.topups.values()
+            if t.user_id == user_id
+        ]
+        rows.sort(key=lambda x: x.expires_at, reverse=True)
+        rows = rows[: max(1, min(int(limit), 200))]
+        return {
+            "entries": [
+                {
+                    "topup_id": t.topup_id,
+                    "time": t.expires_at.isoformat(),
+                    "type": "top_up",
+                    "amount_usd": t.amount_usd,
+                    "amount_v": t.v_credit,
+                    "amount_v_2dp": "2000.00",
+                    "status": t.status,
+                    "mode": t.mode,
+                }
+                for t in rows
+            ],
+            "conversion": {"v_per_usd": "100.000000", "usd_per_v": "0.01"},
+        }
+
     async def complete_fake_topup(self, *, topup_id: str) -> dict:
         t = self.topups.get(topup_id)
         if not t:
@@ -275,6 +299,35 @@ def test_topup_suggest_above_floor_returns_noop_shape_and_creates_no_row(monkeyp
         app.dependency_overrides.clear()
 
 
+def test_topup_history_list_shape_and_owner_scope(monkeypatch):
+    fake = _FakeBillingService()
+    monkeypatch.setattr(payment_routes, "get_billing_service", lambda: fake)
+
+    owner = {"user_id": "owner-user", "role": "authenticated"}
+    active_user = {"user": owner}
+
+    def _current_user():
+        return active_user["user"]
+
+    app.dependency_overrides[auth_middleware.get_current_user] = _current_user
+    try:
+        fake._make_topup(user_id=owner["user_id"])
+        fake._make_topup(user_id="other-user")
+        client = TestClient(app)
+        out = client.get("/billing/topups?limit=50")
+        assert out.status_code == 200
+        payload = out.json()
+        assert "entries" in payload
+        assert "conversion" in payload
+        assert payload["conversion"]["v_per_usd"] == "100.000000"
+        assert len(payload["entries"]) == 1
+        assert payload["entries"][0]["type"] == "top_up"
+        assert payload["entries"][0]["amount_usd"] == "20.00"
+        assert payload["entries"][0]["amount_v_2dp"] == "2000.00"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_fake_service_signatures_match_production_contract():
     assert inspect.signature(_FakeBillingService.create_topup_suggestion) == inspect.signature(
         BillingService.create_topup_suggestion
@@ -284,6 +337,9 @@ def test_fake_service_signatures_match_production_contract():
     )
     assert inspect.signature(_FakeBillingService.complete_fake_topup) == inspect.signature(
         BillingService.complete_fake_topup
+    )
+    assert inspect.signature(_FakeBillingService.list_topup_history) == inspect.signature(
+        BillingService.list_topup_history
     )
 
 

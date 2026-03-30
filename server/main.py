@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from dotenv import load_dotenv
+from openvegas.compact_uuid import decode_compact_uuid
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -23,6 +25,7 @@ from server.routes import agent as agent_routes
 from server.routes import agent_orchestration as agent_orchestration_routes
 from server.routes import ide_bridge as ide_bridge_routes
 from server.routes import payments as payment_routes
+from server.routes import profile_preferences as profile_preferences_routes
 from server.services.dependencies import (
     assert_db_ready,
     assert_redis_ready,
@@ -32,8 +35,28 @@ from server.services.dependencies import (
     get_db,
     init_runtime_deps,
 )
+from openvegas.qr_runtime import ensure_qrcode_available
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+logger = logging.getLogger(__name__)
+
+def _resolve_root_dir() -> Path:
+    env_root = os.getenv("OPENVEGAS_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    candidates.append(Path.cwd())
+    candidates.append(Path(__file__).resolve().parents[1])
+    for candidate in candidates:
+        try:
+            root = candidate.resolve()
+        except Exception:
+            continue
+        if (root / "ui" / "index.html").exists() and (root / "server" / "main.py").exists():
+            return root
+    return Path(__file__).resolve().parents[1]
+
+
+ROOT_DIR = _resolve_root_dir()
 # Allow `uvicorn server.main:app --reload` to work without manually sourcing env vars.
 load_dotenv(ROOT_DIR / ".env", override=False)
 
@@ -41,6 +64,9 @@ load_dotenv(ROOT_DIR / ".env", override=False)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_runtime_deps()
+    qr_ok, qr_reason = ensure_qrcode_available()
+    if not qr_ok:
+        logger.warning("QR runtime unavailable at startup: %s", qr_reason)
     try:
         yield
     finally:
@@ -53,11 +79,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
 UI_INDEX = ROOT_DIR / "ui" / "index.html"
 TOPUP_UI_PAGE = ROOT_DIR / "ui" / "topup.html"
 UI_DIR = ROOT_DIR / "ui"
 UI_ASSETS_DIR = UI_DIR / "assets"
+UI_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 UI_PAGES = {
     "login": UI_DIR / "login.html",
@@ -66,14 +96,21 @@ UI_PAGES = {
     "pricing": UI_DIR / "pricing.html",
     "balance": UI_DIR / "balance.html",
     "payments": UI_DIR / "payments.html",
+    "topup-checkout": UI_DIR / "topup-checkout.html",
+    "checkout-pending": UI_DIR / "checkout-pending.html",
+    "subscription": UI_DIR / "subscription.html",
+    "profile": UI_DIR / "profile.html",
     "transactions": UI_DIR / "transactions.html",
+    "checkout-success": UI_DIR / "checkout-success.html",
+    "checkout-cancel": UI_DIR / "checkout-cancel.html",
     "security": UI_DIR / "security.html",
     "faq": UI_DIR / "faq.html",
-    "docs": UI_DIR / "docs.html",
+    "how-to-play": UI_DIR / "how-to-play.html",
     "contact": UI_DIR / "contact.html",
 }
 
 LEGACY_UI_REDIRECTS = {
+    "docs": "/ui/how-to-play",
 }
 
 UI_ASSETS = {
@@ -86,6 +123,12 @@ UI_ASSETS = {
     "deck.js": UI_ASSETS_DIR / "deck.js",
     "content-registry.js": UI_ASSETS_DIR / "content-registry.js",
     "market-data.json": UI_ASSETS_DIR / "market-data.json",
+    "avatar-engine.js": UI_ASSETS_DIR / "avatar-engine.js",
+    "avatar-renderer.js": UI_ASSETS_DIR / "avatar-renderer.js",
+    "avatar-sprite-loader.js": UI_ASSETS_DIR / "avatar-sprite-loader.js",
+    "avatar-widget.js": UI_ASSETS_DIR / "avatar-widget.js",
+    "avatar-manifest.json": UI_ASSETS_DIR / "avatar-manifest.json",
+    "theme-fallback.js": UI_ASSETS_DIR / "theme-fallback.js",
 }
 
 SLIDES = {
@@ -116,6 +159,7 @@ app.include_router(agent_routes.router, tags=["agent"])
 app.include_router(agent_orchestration_routes.router, tags=["agent-orchestration"])
 app.include_router(ide_bridge_routes.router, tags=["ide-bridge"])
 app.include_router(payment_routes.router, tags=["billing"])
+app.include_router(profile_preferences_routes.router, tags=["profile"])
 
 
 @app.get("/health")
@@ -159,15 +203,37 @@ async def health_ready():
 @app.get("/ui")
 @app.get("/ui/")
 async def ui_page():
-    return FileResponse(UI_INDEX)
+    return FileResponse(UI_INDEX, headers=UI_NO_CACHE_HEADERS)
 
 
-@app.get("/ui/assets/{asset_name}")
-async def ui_asset(asset_name: str):
-    asset = UI_ASSETS.get(asset_name)
-    if not asset or not asset.exists():
+def _resolve_ui_asset(asset_path: str) -> Path | None:
+    raw = str(asset_path or "").strip().lstrip("/")
+    if not raw:
+        return None
+
+    direct = UI_ASSETS.get(raw)
+    if direct and direct.exists() and direct.is_file():
+        return direct
+
+    rel = Path(raw)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+
+    root = UI_ASSETS_DIR.resolve()
+    candidate = (root / rel).resolve()
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    if candidate != root and root not in candidate.parents:
+        return None
+    return candidate
+
+
+@app.get("/ui/assets/{asset_path:path}")
+async def ui_asset(asset_path: str):
+    asset = _resolve_ui_asset(asset_path)
+    if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(asset)
+    return FileResponse(asset, headers=UI_NO_CACHE_HEADERS)
 
 
 @app.get("/ui/slidedeck/{slide_name}")
@@ -175,14 +241,27 @@ async def ui_slide_page(slide_name: str):
     page = SLIDES.get(slide_name)
     if not page or not page.exists():
         raise HTTPException(status_code=404, detail="Slide not found")
-    return FileResponse(page)
+    return FileResponse(page, headers=UI_NO_CACHE_HEADERS)
 
 
 @app.get("/ui/topup/{topup_id}")
 async def ui_topup_page(topup_id: str):
     if not TOPUP_UI_PAGE.exists():
         raise HTTPException(status_code=404, detail="Page not found")
-    return FileResponse(TOPUP_UI_PAGE)
+    return FileResponse(TOPUP_UI_PAGE, headers=UI_NO_CACHE_HEADERS)
+
+
+@app.get("/t/{topup_id}")
+async def ui_topup_short_redirect(topup_id: str):
+    return RedirectResponse(url=f"/ui/topup/{topup_id}", status_code=307)
+
+
+@app.get("/r/{compact_topup_id}")
+async def ui_topup_compact_redirect(compact_topup_id: str):
+    topup_id = decode_compact_uuid(compact_topup_id)
+    if not topup_id:
+        raise HTTPException(status_code=404, detail="Top-up not found")
+    return RedirectResponse(url=f"/ui/topup/{topup_id}", status_code=307)
 
 
 @app.get("/ui/{slug}")
@@ -193,4 +272,12 @@ async def ui_page_slug(slug: str):
     page = UI_PAGES.get(slug)
     if not page or not page.exists():
         raise HTTPException(status_code=404, detail="Page not found")
-    return FileResponse(page)
+    return FileResponse(page, headers=UI_NO_CACHE_HEADERS)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+async def ui_favicon_fallback():
+    # Keep logs clean when browsers probe standard icon paths.
+    return Response(status_code=204)

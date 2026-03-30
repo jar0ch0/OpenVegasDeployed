@@ -262,3 +262,238 @@ def test_stripe_gateway_falls_back_to_options_idempotency(monkeypatch):
     assert out["id"] == "cs_1"
     assert session_api.kwargs["options"]["idempotency_key"] == "topup-checkout:topup_1"
     assert session_api.kwargs["client_reference_id"] == "topup_1"
+
+
+def test_render_qr_svg_includes_runtime_reason_when_dependency_missing(monkeypatch):
+    monkeypatch.setattr(
+        "openvegas.payments.service.ensure_qrcode_available",
+        lambda: (False, "ModuleNotFoundError: No module named 'qrcode'"),
+    )
+    payload = BillingService._render_qr_svg("https://checkout.stripe.com/c/pay/cs_live_demo")
+    text = payload.decode("utf-8")
+    assert "QR unavailable in this runtime" in text
+    assert "reason: ModuleNotFoundError: No module named 'qrcode'" in text
+
+
+@pytest.mark.asyncio
+async def test_ensure_user_customer_uses_only_real_stripe_customer_ids():
+    class _Tx(_FakeTx):
+        async def fetchrow(self, query: str, *args):
+            self.fetchrow_calls.append((query, args))
+            if "SELECT stripe_customer_id" in query and "mode = 'stripe'" in query:
+                # Simulated ids should never be reused for live Stripe checkouts.
+                return None
+            if "SELECT email FROM auth.users" in query:
+                return {"email": "qa@example.com"}
+            return None
+
+    tx = _Tx()
+    gateway = types.SimpleNamespace(
+        mode="stripe",
+        create_customer=lambda **kwargs: {"id": "cus_new_123"},
+    )
+    svc = BillingService(_FakeDB(tx=tx), _DummyWallet(), gateway)
+    customer_id = await svc._ensure_user_customer("u1")
+    assert customer_id == "cus_new_123"
+
+
+@pytest.mark.asyncio
+async def test_create_topup_checkout_recovers_from_legacy_sim_customer_id(monkeypatch):
+    monkeypatch.setenv("TOPUP_MIN_USD", "1")
+    monkeypatch.setenv("TOPUP_MAX_USD", "500")
+    monkeypatch.setenv("V_PER_USD", "100")
+
+    class _Tx(_FakeTx):
+        async def fetchrow(self, query: str, *args):
+            self.fetchrow_calls.append((query, args))
+            if "WHERE user_id = $1 AND idempotency_key = $2" in query:
+                return None
+            if "UPDATE fiat_topups" in query and "RETURNING *" in query:
+                return {
+                    "id": "top_retry_1",
+                    "status": "checkout_created",
+                    "mode": "stripe",
+                    "amount_usd": Decimal("20.00"),
+                    "v_credit": Decimal("2000.000000"),
+                    "stripe_checkout_session_id": "cs_retry_1",
+                    "stripe_checkout_url": "https://checkout.stripe.com/c/pay/cs_retry_1",
+                    "stripe_payment_intent_id": None,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            return None
+
+    class _RetryGateway:
+        mode = "stripe"
+
+        def __init__(self):
+            self.calls = 0
+            self.seen_customers: list[str] = []
+
+        def create_topup_checkout(self, *, customer_id: str, amount_usd: Decimal, topup_id: str):
+            _ = (amount_usd, topup_id)
+            self.calls += 1
+            self.seen_customers.append(customer_id)
+            if self.calls == 1:
+                raise RuntimeError("Request req_1: No such customer: 'sim_u1'")
+            return {"id": "cs_retry_1", "url": "https://checkout.stripe.com/c/pay/cs_retry_1"}
+
+    tx = _Tx()
+    gateway = _RetryGateway()
+    svc = BillingService(_FakeDB(tx=tx), _DummyWallet(), gateway)
+
+    async def _fake_ensure_user_customer(user_id: str) -> str:
+        _ = user_id
+        return "sim_u1"
+
+    async def _fake_create_user_customer(user_id: str) -> str:
+        _ = user_id
+        return "cus_live_1"
+
+    svc._ensure_user_customer = _fake_ensure_user_customer  # type: ignore[method-assign]
+    svc._create_user_customer = _fake_create_user_customer  # type: ignore[method-assign]
+
+    out = await svc.create_topup_checkout(
+        user_id="u1",
+        amount_usd=Decimal("20.00"),
+        idempotency_key="idem-retry-1",
+    )
+
+    assert out["status"] == "checkout_created"
+    assert out["mode"] == "stripe"
+    assert gateway.calls == 2
+    assert gateway.seen_customers == ["sim_u1", "cus_live_1"]
+
+
+@pytest.mark.asyncio
+async def test_create_user_subscription_checkout_uses_user_endpoint_flow(monkeypatch):
+    monkeypatch.setenv("USER_SUBSCRIPTION_MIN_USD", "1")
+    monkeypatch.setenv("USER_SUBSCRIPTION_MAX_USD", "500")
+
+    class _Gateway:
+        mode = "stripe"
+
+        def __init__(self):
+            self.calls = []
+
+        def create_user_subscription_checkout(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"id": "cs_sub_1", "url": "https://checkout.stripe.com/c/pay/cs_sub_1"}
+
+    tx = _FakeTx()
+    gateway = _Gateway()
+    svc = BillingService(_FakeDB(tx=tx), _DummyWallet(), gateway)
+
+    async def _fake_ensure_user_subscription_customer(user_id: str) -> str:
+        assert user_id == "u-sub-1"
+        return "cus_sub_1"
+
+    svc._ensure_user_subscription_customer = _fake_ensure_user_subscription_customer  # type: ignore[method-assign]
+
+    out = await svc.create_user_subscription_checkout(
+        user_id="u-sub-1",
+        monthly_amount_usd=Decimal("20.00"),
+    )
+
+    assert out["user_id"] == "u-sub-1"
+    assert out["checkout_session_id"] == "cs_sub_1"
+    assert out["checkout_url"] == "https://checkout.stripe.com/c/pay/cs_sub_1"
+    assert out["monthly_amount_usd"] == "20.00"
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["customer_id"] == "cus_sub_1"
+    assert gateway.calls[0]["user_id"] == "u-sub-1"
+    assert gateway.calls[0]["monthly_amount_usd"] == Decimal("20.00")
+    assert any("INSERT INTO user_subscriptions" in q for q, _ in tx.execute_calls)
+
+
+@pytest.mark.asyncio
+async def test_invoice_paid_credits_user_wallet_for_user_subscription():
+    class _InvoiceTx(_FakeTx):
+        async def fetchrow(self, query: str, *args):
+            self.fetchrow_calls.append((query, args))
+            if "FROM user_subscriptions" in query and "WHERE stripe_subscription_id = $1" in query:
+                return {"user_id": "u-invoice", "stripe_customer_id": "cus_invoice"}
+            if "FROM fiat_topups" in query and "idempotency_key = $2" in query:
+                return None
+            return None
+
+    wallet = _DummyWallet()
+    tx = _InvoiceTx()
+    svc = _svc(db=_FakeDB(tx=tx), wallet=wallet)
+
+    out = await svc._apply_invoice_credit_once(
+        tx=tx,
+        invoice={
+            "id": "in_user_1",
+            "subscription": "sub_user_1",
+            "amount_paid": 2000,
+            "currency": "usd",
+            "payment_intent": "pi_user_1",
+        },
+    )
+
+    assert out["status"] == "credited"
+    assert out["user_id"] == "u-invoice"
+    assert wallet.calls
+    assert wallet.calls[0][0] == "user:u-invoice"
+    assert wallet.calls[0][2].startswith("fiat_topup:")
+    assert any("INSERT INTO fiat_topups" in q for q, _ in tx.execute_calls)
+
+
+@pytest.mark.asyncio
+async def test_invoice_paid_falls_back_to_customer_lookup_when_subscription_not_synced():
+    class _FallbackTx(_FakeTx):
+        async def fetchrow(self, query: str, *args):
+            self.fetchrow_calls.append((query, args))
+            if "FROM user_subscriptions" in query and "WHERE stripe_subscription_id = $1" in query:
+                return None
+            if "FROM user_subscriptions" in query and "WHERE stripe_customer_id = $1" in query:
+                return {"user_id": "u-fallback", "stripe_customer_id": "cus_fallback"}
+            if "FROM fiat_topups" in query and "idempotency_key = $2" in query:
+                return None
+            return None
+
+    wallet = _DummyWallet()
+    tx = _FallbackTx()
+    svc = _svc(db=_FakeDB(tx=tx), wallet=wallet)
+
+    out = await svc._apply_invoice_credit_once(
+        tx=tx,
+        invoice={
+            "id": "in_user_fb_1",
+            "subscription": "sub_user_fb_1",
+            "customer": "cus_fallback",
+            "amount_paid": 2000,
+            "currency": "usd",
+            "payment_intent": "pi_user_fb_1",
+        },
+    )
+
+    assert out["status"] == "credited"
+    assert out["user_id"] == "u-fallback"
+    assert wallet.calls and wallet.calls[0][0] == "user:u-fallback"
+    assert any(
+        "UPDATE user_subscriptions" in q and "stripe_subscription_id = COALESCE" in q
+        for q, _ in tx.execute_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_invoice_payment_failed_marks_user_subscription_past_due():
+    class _PastDueTx(_FakeTx):
+        async def fetchrow(self, query: str, *args):
+            self.fetchrow_calls.append((query, args))
+            if "UPDATE user_subscriptions" in query and "RETURNING user_id" in query:
+                return {"user_id": "u-past-due"}
+            return None
+
+    tx = _PastDueTx()
+    svc = _svc(db=_FakeDB(tx=tx))
+
+    out = await svc._mark_subscription_past_due(
+        tx=tx,
+        invoice={"subscription": "sub_user_2"},
+    )
+
+    assert out["status"] == "past_due"
+    assert out["scope"] == "user"
+    assert out["user_id"] == "u-past-due"

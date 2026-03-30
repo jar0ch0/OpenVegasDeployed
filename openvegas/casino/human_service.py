@@ -17,6 +17,7 @@ from openvegas.casino.poker import PokerGame
 from openvegas.casino.roulette import RouletteGame
 from openvegas.casino.slots import SlotsGame
 from openvegas.casino.baccarat import BaccaratGame
+from openvegas.casino.constants import HIDDEN_CARD_TOKEN, min_game_wager_v
 from openvegas.rng.provably_fair import ProvablyFairRNG
 from openvegas.wallet.ledger import InsufficientBalance, WalletService
 
@@ -67,8 +68,20 @@ def _state_error(error: str, current_state: str, valid_actions: list[str] | None
     )
 
 
-def _public_state(state: dict) -> dict:
-    return {k: v for k, v in state.items() if not str(k).startswith("_")}
+def _public_state_for_game(game_code: str, state: dict, current_state: str) -> dict:
+    public_state = {k: v for k, v in state.items() if not str(k).startswith("_")}
+    # Never expose future-card information.
+    public_state.pop("deck", None)
+    public_state.pop("shoe", None)
+    if game_code == "blackjack" and current_state != "resolved":
+        dealer = public_state.get("dealer")
+        if isinstance(dealer, list) and len(dealer) >= 2:
+            public_state["dealer"] = [dealer[0], HIDDEN_CARD_TOKEN]
+    if game_code == "poker" and current_state != "resolved":
+        dealer = public_state.get("dealer")
+        if isinstance(dealer, list) and dealer:
+            public_state["dealer"] = [HIDDEN_CARD_TOKEN for _ in dealer]
+    return public_state
 
 
 def _parse_state(raw: Any) -> dict:
@@ -311,6 +324,8 @@ class HumanCasinoService:
 
             round_id = str(uuid.uuid4())
             wager_v = Decimal(str(wager_v))
+            if wager_v < min_game_wager_v():
+                raise ValueError(f"Wager must be at least {min_game_wager_v()} $V")
             account_id = f"user:{user_id}"
             await self.wallet.ensure_escrow_account(round_id)
             await self.wallet.place_bet(
@@ -354,7 +369,7 @@ class HumanCasinoService:
                         "round_id": round_id,
                         "casino_session_id": session_id,
                         "rng_commit": commitment,
-                        "state": _public_state(state),
+                        "state": _public_state_for_game(game_code, state, current_state),
                         "current_state": current_state,
                         "valid_actions": valid_actions,
                     }
@@ -487,7 +502,7 @@ class HumanCasinoService:
                 body_text=_json_text(
                     {
                         "round_id": round_id,
-                        "state": _public_state(state),
+                        "state": _public_state_for_game(str(row["game_code"]), state, new_status),
                         "current_state": new_status,
                         "valid_actions": new_valid_actions,
                     }
@@ -728,20 +743,7 @@ class HumanCasinoService:
                 break
             return actions
         if game_code == "poker":
-            hand = [tuple(c) for c in state.get("hand", [])]
-            keep: list[int] = []
-            rank_positions: dict[str, list[int]] = {}
-            for idx, card in enumerate(hand):
-                rank_positions.setdefault(card[0], []).append(idx)
-            for _, positions in rank_positions.items():
-                if len(positions) >= 2:
-                    keep.extend(positions)
-            if not keep:
-                for idx, card in enumerate(hand):
-                    if card[0] in {"J", "Q", "K", "A"}:
-                        keep.append(idx)
-            keep = sorted(set(keep))
-            return [("hold", {"positions": keep})]
+            return [("call", {})]
         return []
 
     async def demo_autoplay(

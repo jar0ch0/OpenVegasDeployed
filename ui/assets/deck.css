@@ -2,10 +2,10 @@
   min-height: 100vh;
   padding: 2rem;
   background:
-    radial-gradient(circle at 88% 5%, rgba(68, 198, 221, 0.08), transparent 32%),
-    radial-gradient(circle at 12% 90%, rgba(124, 223, 124, 0.06), transparent 32%),
-    var(--black);
-  color: var(--white);
+    radial-gradient(circle at 88% 5%, var(--bg-glow-aqua), transparent 32%),
+    radial-gradient(circle at 12% 90%, var(--bg-glow-lime), transparent 32%),
+    var(--bg-main);
+  color: var(--text-main);
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   gap: 1rem;
@@ -34,8 +34,8 @@
 }
 
 .slide-body {
-  border: 1px solid var(--grey-dark);
-  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid var(--line);
+  background: var(--card-bg);
   padding: 1.2rem;
   display: grid;
   align-content: start;
@@ -45,7 +45,7 @@
 .slide-body ul {
   padding-left: 1.1rem;
   line-height: 1.55;
-  color: var(--white);
+  color: var(--text-main);
 }
 
 .placeholder-list {
@@ -55,7 +55,7 @@
 
 .placeholder-list > div {
   padding: 0.45rem 0;
-  border-bottom: 1px solid var(--grey-dark);
+  border-bottom: 1px solid var(--line);
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--grey-light);
@@ -76,7 +76,7 @@
 .deck-footer {
   margin-top: 0.3rem;
   padding-top: 0.85rem;
-  border-top: 1px solid var(--grey-dark);
+  border-top: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -93,7 +93,7 @@
 }
 
 .deck-footer a:hover {
-  color: var(--white);
+  color: var(--text-main);
 }
 
 @media (max-width: 800px) {

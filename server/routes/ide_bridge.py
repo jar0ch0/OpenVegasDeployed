@@ -318,6 +318,20 @@ async def ide_message(req: IDEEnvelopeRequest, user: dict = Depends(get_current_
                 params.get("new_contents", ""),
                 allow_partial_accept=bool(params.get("allow_partial_accept", True)),
             )
+        elif method == "show_diff_interactive":
+            interactive = getattr(session.bridge, "show_diff_interactive", None)
+            if callable(interactive):
+                result = await interactive(
+                    params.get("path", ""),
+                    params.get("new_contents", ""),
+                    allow_partial_accept=bool(params.get("allow_partial_accept", True)),
+                )
+            else:
+                result = await session.bridge.show_diff(
+                    params.get("path", ""),
+                    params.get("new_contents", ""),
+                    allow_partial_accept=bool(params.get("allow_partial_accept", True)),
+                )
         elif method == "read_buffer":
             result = {"content": await session.bridge.read_buffer(params.get("path", ""))}
         elif method == "get_context":

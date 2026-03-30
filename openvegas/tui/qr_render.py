@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from openvegas.qr_runtime import ensure_qrcode_available
+
 
 def _build_matrix(value: str, border: int) -> list[list[bool]]:
+    ok, reason = ensure_qrcode_available()
+    if not ok:
+        raise RuntimeError(str(reason or "qrcode runtime unavailable"))
     import qrcode  # type: ignore
 
-    qr = qrcode.QRCode(border=max(0, int(border)), box_size=1)
+    qr = qrcode.QRCode(
+        border=max(0, int(border)),
+        box_size=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+    )
     qr.add_data(str(value))
     qr.make(fit=True)
     return qr.get_matrix()

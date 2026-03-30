@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import io
+
 from rich.console import Console
 
+from openvegas.compact_uuid import encode_compact_uuid
+import openvegas.tui.chat_renderer as chat_renderer
 from openvegas.tui.chat_renderer import (
     render_assistant,
     render_status_bar,
@@ -47,3 +51,33 @@ def test_render_topup_hint_prints_low_balance_and_checkout_url():
     assert "Low balance" in out
     assert "Suggested top-up: $20.00" in out
     assert "https://checkout.openvegas.local/topup/abc" in out
+
+
+def test_render_topup_hint_prefers_short_status_url_for_qr(monkeypatch):
+    class _TTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    captured = {"value": ""}
+    monkeypatch.setattr(chat_renderer.sys, "stdout", _TTY())
+    monkeypatch.setenv("APP_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(chat_renderer, "qr_width", lambda value, border=0: 10)
+
+    def _fake_qr_half_block(value: str, border: int = 0) -> str:
+        captured["value"] = value
+        return "QRLINE1\nQRLINE2"
+
+    monkeypatch.setattr(chat_renderer, "qr_half_block", _fake_qr_half_block)
+    console = Console(file=io.StringIO(), record=True, width=120, force_terminal=False)
+    render_topup_hint(
+        console,
+        {
+            "topup_id": "123e4567-e89b-12d3-a456-426614174000",
+            "checkout_url": "https://checkout.stripe.com/c/pay/cs_demo",
+            "qr_value": "https://checkout.stripe.com/c/pay/cs_demo",
+            "mode": "stripe",
+        },
+    )
+    compact = encode_compact_uuid("123e4567-e89b-12d3-a456-426614174000")
+    assert captured["value"] == f"http://127.0.0.1:8000/r/{compact}"

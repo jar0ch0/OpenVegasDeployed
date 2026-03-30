@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Preparing Checkout</title>
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  </head>
+  <body>
+    <main class="container page-shell" style="max-width:700px; padding-top:48px;">
+      <article class="card">
+        <div class="text-mono-xs">CHECKOUT</div>
+        <h1 class="card-title">Preparing Stripe checkout...</h1>
+        <p class="text-mono-sm">This tab will redirect automatically once your checkout session is ready.</p>
+        <p class="text-mono-sm">If it does not redirect, return to the previous tab and open the checkout link manually.</p>
+      </article>
+    </main>
+    <script type="module">
+      import { installAssetGuard } from "/ui/assets/site.js?v=20260330";
+      installAssetGuard();
+    </script>
+  </body>
+</html>

@@ -8,7 +8,7 @@ from openvegas.rng.provably_fair import ProvablyFairRNG
 from openvegas.casino.blackjack import BlackjackGame, hand_value
 from openvegas.casino.roulette import RouletteGame
 from openvegas.casino.slots import SlotsGame
-from openvegas.casino.poker import PokerGame, evaluate_hand
+from openvegas.casino.poker import PokerGame
 from openvegas.casino.baccarat import BaccaratGame
 
 
@@ -156,36 +156,56 @@ def test_slots_deterministic(rng):
 def test_poker_initial_state(rng):
     game = PokerGame()
     state = game.initial_state(rng, "seed", 0)
-    assert len(state["hand"]) == 5
-    assert state["phase"] == "draw"
+    assert len(state["player"]) == 2
+    assert len(state["dealer"]) == 2
+    assert len(state["community"]) == 3
+    assert state["phase"] == "decision"
 
 
-def test_poker_hold_action(rng):
+def test_poker_call_action(rng):
     game = PokerGame()
     state = game.initial_state(rng, "seed", 0)
 
-    state = game.apply_action(state, "hold", {"positions": [0, 2, 4]}, rng, "seed", 100)
+    state = game.apply_action(state, "call", {}, rng, "seed", 100)
     assert game.is_resolved(state)
+    assert len(state["community"]) == 5
 
     mult, data = game.resolve(state)
-    assert mult >= Decimal("0")
-    assert "rank" in data
+    assert mult in (Decimal("0"), Decimal("1"), Decimal("2"))
+    assert data["result"] in {"player_wins", "dealer_wins", "push"}
+    assert "player_rank" in data
+    assert "dealer_rank" in data
 
 
-def test_poker_stand_action(rng):
+def test_poker_fold_action(rng):
     game = PokerGame()
     state = game.initial_state(rng, "seed", 0)
-    state = game.apply_action(state, "stand", {}, rng, "seed", 100)
+    state = game.apply_action(state, "fold", {}, rng, "seed", 100)
     assert game.is_resolved(state)
+    mult, data = game.resolve(state)
+    assert mult == Decimal("0")
+    assert data["result"] == "folded"
 
 
-def test_evaluate_hand():
-    assert evaluate_hand([("A", "S"), ("K", "S"), ("Q", "S"), ("J", "S"), ("10", "S")]) == "royal_flush"
-    assert evaluate_hand([("5", "H"), ("5", "D"), ("5", "S"), ("5", "C"), ("K", "H")]) == "four_of_a_kind"
-    assert evaluate_hand([("3", "H"), ("3", "D"), ("3", "S"), ("7", "C"), ("7", "H")]) == "full_house"
-    assert evaluate_hand([("2", "H"), ("5", "H"), ("8", "H"), ("J", "H"), ("A", "H")]) == "flush"
-    assert evaluate_hand([("J", "S"), ("J", "H"), ("3", "D"), ("7", "C"), ("9", "S")]) == "jacks_or_better"
-    assert evaluate_hand([("2", "S"), ("5", "H"), ("8", "D"), ("J", "C"), ("A", "S")]) == "nothing"
+def test_poker_deterministic_call_resolution(rng):
+    game1 = PokerGame()
+    game2 = PokerGame()
+    rng2 = ProvablyFairRNG()
+    rng2.server_seed = rng.server_seed
+    rng2.server_seed_hash = rng.server_seed_hash
+
+    s1 = game1.initial_state(rng, "seed", 0)
+    s2 = game2.initial_state(rng2, "seed", 0)
+    assert s1["player"] == s2["player"]
+    assert s1["dealer"] == s2["dealer"]
+    assert s1["community"] == s2["community"]
+
+    s1 = game1.apply_action(s1, "call", {}, rng, "seed", 10)
+    s2 = game2.apply_action(s2, "call", {}, rng2, "seed", 10)
+    m1, d1 = game1.resolve(s1)
+    m2, d2 = game2.resolve(s2)
+    assert m1 == m2
+    assert d1["result"] == d2["result"]
 
 
 # ---- Baccarat ----

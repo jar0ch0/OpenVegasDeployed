@@ -41,6 +41,10 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "026_agent_tool_cancelled_status_v30")' in deps
     assert 'require_migration_min(db, "027_agent_tool_result_payload_column_v30_fix")' in deps
     assert 'require_migration_min(db, "028_billing_topup_hardening")' in deps
+    assert 'require_migration_min(db, "031_user_subscription_billing")' in deps
+    assert 'require_migration_min(db, "032_wallet_bootstrap_and_continuation")' in deps
+    assert 'require_migration_min(db, "033_avatar_preferences")' in deps
+    assert 'require_migration_min(db, "036_profile_theme_preferences")' in deps
     assert '"horse_quotes"' in deps
     assert '"horse_quote_idempotency"' in deps
     assert '"provider_credentials"' in deps
@@ -49,9 +53,18 @@ def test_startup_schema_requires_security_migrations():
     assert '"wrapper_reward_events"' in deps
     assert '"org_runtime_policies"' in deps
     assert '"context_retention_policies"' in deps
+    assert '"user_starter_grants"' in deps
+    assert '"user_continuation_credit"' in deps
+    assert '"continuation_claim_idempotency"' in deps
+    assert '"continuation_accounting_events"' in deps
+    assert '"profiles"' in deps
     assert '("fiat_topups", "mode")' in deps
     assert '("fiat_topups", "expires_at")' in deps
     assert '("fiat_topups", "manual_reconciliation_required")' in deps
+    assert '("profiles", "avatar_id")' in deps
+    assert '("profiles", "avatar_palette")' in deps
+    assert '("profiles", "dealer_skin_id")' in deps
+    assert '("profiles", "theme")' in deps
     assert '"provider_threads"' in deps
     assert '"provider_thread_messages"' in deps
     assert '"agent_runs"' in deps
@@ -213,6 +226,49 @@ def test_billing_topup_hardening_migration_exists_and_adds_mode_expiry_reconcili
     assert "ALTER TYPE fiat_topup_status ADD VALUE 'expired'" in sql
     assert "ALTER TYPE fiat_topup_status ADD VALUE 'manual_reconciliation_required'" in sql
     assert "028_billing_topup_hardening" in sql
+
+
+def test_user_subscription_billing_migration_exists_and_enforces_self_scope():
+    sql = _read("supabase/migrations/031_user_subscription_billing.sql")
+    assert "CREATE TABLE IF NOT EXISTS user_subscriptions" in sql
+    assert "uq_user_subscriptions_stripe_customer_id" in sql
+    assert "ck_user_subscriptions_status" in sql
+    assert "ALTER TABLE user_subscriptions ENABLE ROW LEVEL SECURITY;" in sql
+    assert "user_subscriptions_select_self" in sql
+    assert "031_user_subscription_billing" in sql
+
+
+def test_wallet_bootstrap_and_continuation_migration_exists_and_enforces_accounting_contracts():
+    sql = _read("supabase/migrations/032_wallet_bootstrap_and_continuation.sql")
+    assert "CREATE TABLE IF NOT EXISTS user_starter_grants" in sql
+    assert "CREATE TABLE IF NOT EXISTS user_continuation_credit" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_continuation_active" in sql
+    assert "(status = 'cancelled' AND outstanding_v = 0 AND repaid_at IS NULL)" in sql
+    assert "CREATE TABLE IF NOT EXISTS continuation_claim_idempotency" in sql
+    assert "CREATE TABLE IF NOT EXISTS continuation_accounting_events" in sql
+    assert "event_type IN ('principal_repaid','principal_written_off')" in sql
+    assert "032_wallet_bootstrap_and_continuation" in sql
+
+
+def test_avatar_preferences_migration_exists_and_enforces_constraints():
+    sql = _read("supabase/migrations/033_avatar_preferences.sql")
+    assert "ADD COLUMN IF NOT EXISTS avatar_id TEXT DEFAULT 'ov_user_01'" in sql
+    assert "ADD COLUMN IF NOT EXISTS avatar_palette TEXT DEFAULT 'default'" in sql
+    assert "ADD COLUMN IF NOT EXISTS dealer_skin_id TEXT DEFAULT 'ov_dealer_female_tux_v1'" in sql
+    assert "profiles_avatar_id_len" in sql
+    assert "profiles_avatar_palette_len" in sql
+    assert "profiles_dealer_skin_len" in sql
+    assert "idx_profiles_avatar_lookup" in sql
+    assert "033_avatar_preferences" in sql
+
+
+def test_profile_theme_preferences_migration_exists_and_enforces_theme_domain():
+    sql = _read("supabase/migrations/036_profile_theme_preferences.sql")
+    assert "ADD COLUMN IF NOT EXISTS theme TEXT DEFAULT 'light'" in sql
+    assert "ALTER COLUMN theme SET NOT NULL" in sql
+    assert "profiles_theme_allowed" in sql
+    assert "theme IN ('light', 'dark')" in sql
+    assert "036_profile_theme_preferences" in sql
 
 
 def test_callback_mutator_modules_do_not_touch_replay_helpers():

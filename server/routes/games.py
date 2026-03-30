@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from openvegas.casino.constants import min_game_wager_v
 from server.middleware.auth import get_current_user
 from server.services.dependencies import get_wallet, get_fraud_engine, get_db
 from server.services.demo_admin import is_demo_admin_user
@@ -348,6 +349,7 @@ def _horse_effective_multiplier(odds: Decimal, bet_type: str) -> Decimal:
 
 
 def _build_horse_pricing_board(*, game: HorseRacing, budget_v: Decimal, bet_type: str) -> list[dict]:
+    min_wager = min_game_wager_v()
     rows: list[dict] = []
     for horse in game.horses:
         odds = _q6_down(Decimal(str(horse.odds)))
@@ -367,6 +369,11 @@ def _build_horse_pricing_board(*, game: HorseRacing, budget_v: Decimal, bet_type
                 if selectable:
                     debit_v = _q6_down(unit_price * Decimal(max_units))
                     payout_if_hit_v = _q6_down(Decimal(max_units))
+                    if debit_v < min_wager:
+                        selectable = False
+                        max_units = 0
+                        debit_v = Decimal("0")
+                        payout_if_hit_v = Decimal("0")
 
         rows.append(
             {
@@ -609,6 +616,10 @@ async def _play_horse_quote(
             out = _error_response(409, "quote_position_unselectable", "Selected horse position has zero debit")
             await _idem_persist(tx, row_id=idem.row_id, response=out, resource_id=quote_id)
             return out
+        if not is_demo and debit_v < min_game_wager_v():
+            out = _error_response(400, "wager_below_minimum", f"Wager must be at least {min_game_wager_v()} $V")
+            await _idem_persist(tx, row_id=idem.row_id, response=out, resource_id=quote_id)
+            return out
 
         game = HorseRacing()
         game_id = str(uuid.uuid4())
@@ -781,6 +792,8 @@ async def _play_round_legacy(
 
     # Escrow the bet
     bet_amount = Decimal(str(req.amount))
+    if not is_demo and bet_amount < min_game_wager_v():
+        raise HTTPException(400, f"Wager must be at least {min_game_wager_v()} $V")
     account_id = f"user:{user['user_id']}"
     demo_ref = f"demo:{game_id}" if is_demo else game_id
     try:

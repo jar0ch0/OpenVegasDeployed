@@ -7,6 +7,8 @@ from dataclasses import field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 
+from openvegas.casino.constants import min_game_wager_v
+
 
 class Step(str, Enum):
     ACTION = "action"
@@ -33,14 +35,14 @@ class WizardState:
 
 
 def steps_for_state(state: WizardState) -> list[Step]:
-    if state.action in {"Play", "Play (Demo Win)"}:
+    if state.action == "Play":
         steps = [Step.ACTION, Step.GAME]
         if state.game == "horse":
             steps.append(Step.BET_TYPE)
         steps.extend([Step.INPUTS, Step.REVIEW, Step.RESULT])
         return steps
 
-    if state.action in {"Deposit", "Verify", "Verify (Demo)"}:
+    if state.action in {"Deposit", "Verify"}:
         return [Step.ACTION, Step.INPUTS, Step.REVIEW, Step.RESULT]
 
     return [Step.ACTION, Step.REVIEW, Step.RESULT]
@@ -51,12 +53,12 @@ def visible_fields_for_state(state: WizardState) -> set[str]:
         return set()
     if state.action == "Deposit":
         return {"amount"}
-    if state.action in {"Play", "Play (Demo Win)"}:
+    if state.action == "Play":
         fields = {"amount", "game"}
         if state.game == "horse":
             fields.update({"horse", "bet_type"})
         return fields
-    if state.action in {"Verify", "Verify (Demo)"}:
+    if state.action == "Verify":
         return {"game_id"}
     return set()
 
@@ -74,10 +76,12 @@ def validate_inputs(state: WizardState) -> str | None:
                 return "Amount must be greater than 0."
             return None
 
-        if state.action in {"Play", "Play (Demo Win)"}:
+        if state.action == "Play":
             stake = Decimal(state.amount)
             if stake <= 0:
                 return "Stake must be greater than 0."
+            if stake < min_game_wager_v():
+                return f"Stake must be at least {min_game_wager_v():.2f} $V."
             if state.game == "horse":
                 if not state.horse.strip():
                     return "Horse number is required for horse play."
@@ -88,7 +92,7 @@ def validate_inputs(state: WizardState) -> str | None:
                     return "Horse quote is required. Fetch quote before horse play."
             return None
 
-        if state.action in {"Verify", "Verify (Demo)"}:
+        if state.action == "Verify":
             if not state.game_id.strip():
                 return "Game ID is required."
             return None
@@ -97,7 +101,7 @@ def validate_inputs(state: WizardState) -> str | None:
     except (InvalidOperation, ValueError):
         if state.action == "Deposit":
             return "Invalid amount. Example: 5 or 2.5"
-        if state.action in {"Play", "Play (Demo Win)"}:
+        if state.action == "Play":
             if state.game == "horse":
                 return "Stake must be numeric and horse must be an integer."
             return "Invalid stake amount."

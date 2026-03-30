@@ -3,104 +3,111 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenVegas | Compute Liquidity Layer</title>
+    <title>OpenVegas | Top Up, Use, or Extend</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/ui/assets/theme.css" />
-    <link rel="stylesheet" href="/ui/assets/layout.css" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
   </head>
   <body>
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"></div>
+        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
         <div id="founderLinks" class="founder-links"></div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <a class="btn btn-primary" style="padding:6px 10px;" href="/ui/login?next=%2Fui">OpenVegas login</a>
+          <a class="btn" style="padding:6px 10px;" href="/ui/login?mode=signup&amp;next=%2Fui">OpenVegas signup</a>
+        </div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
     </nav>
 
     <main class="container page-shell">
       <header class="page-hero">
         <div>
-          <div class="text-mono-xs" style="margin-bottom:1rem">TOKENIZED COMPUTE INFRASTRUCTURE</div>
-          <h1 class="page-title">Run AI Work.<br />No Credit Downtime.</h1>
+          <div class="text-mono-xs" style="margin-bottom:1rem">AI CREDIT + GAME RUNTIME LAYER</div>
+          <h1 class="page-title">OpenVegas</h1>
           <div class="cta-row">
             <a class="btn btn-primary" href="/ui/pricing">View pricing</a>
             <a class="btn" href="/ui/balance">Open balance</a>
-            <a class="btn" href="/ui/balance#payments">Top-up flow</a>
+            <a class="btn" href="/ui/balance#play">See games</a>
           </div>
         </div>
         <div>
           <p class="text-mono-sm page-lead">
-            OpenVegas turns wallet balance into programmable compute liquidity with deterministic settlement,
-            low-balance top-up loops, and terminal-native workflows for teams shipping with AI.
+            Buy credits, keep working, or play to extend your balance. OpenVegas gives users a way to fund AI
+            usage, redeem credits for compute, and use games as an optional path to stretch runtime further.
+            In some usage patterns, this can extend runtime well beyond direct top-up alone.
           </p>
         </div>
       </header>
 
       <section class="section-grid-3">
         <article class="card border-r">
-          <div class="tag">REAL-TIME FLOW</div>
-          <h2 class="card-title">Credit Exchange</h2>
+          <div class="tag">REAL-TIME COMPUTE</div>
+          <h2 class="card-title">Buy credits. Use them directly.</h2>
           <p class="card-copy">
-            Convert wallet value into inference spend with idempotent execution contracts and explicit status
-            transitions.
+            Fund your balance once, then redeem credits for AI usage without constantly stopping to re-up inside
+            separate tools.
           </p>
-          <div class="spec-row"><span class="text-mono-xs">Settlement</span><span class="text-mono-xs c-aqua">ATOMIC</span></div>
-          <div class="spec-row"><span class="text-mono-xs">Providers</span><span class="text-mono-xs">OPENAI / ANTHROPIC / GEMINI</span></div>
-          <div class="spec-row"><span class="text-mono-xs">Reliability</span><span class="text-mono-xs c-lime">STRICT IDEMPOTENCY</span></div>
+          <div class="spec-row"><span class="text-mono-xs">FLOW</span><span class="text-mono-xs c-aqua">TOP UP -> REDEEM -> RUN</span></div>
+          <div class="spec-row"><span class="text-mono-xs">SUPPORT</span><span class="text-mono-xs">OPENAI / ANTHROPIC / MORE</span></div>
+          <div class="spec-row"><span class="text-mono-xs">CONTROL</span><span class="text-mono-xs c-lime">WALLET + BALANCE</span></div>
         </article>
 
         <article class="card border-r">
-          <div class="tag" style="border-color:var(--white); color:var(--white);">BILLING UX</div>
-          <h2 class="card-title">Top-up Surface</h2>
+          <div class="tag" style="border-color:var(--white); color:var(--white);">EXTENDED RUNTIME</div>
+          <h2 class="card-title">Stretch your compute with games.</h2>
           <p class="card-copy">
-            Balance, payment, transaction, and top-up pages are unified so users can understand wallet health and act
-            immediately.
+            OpenVegas is not just a billing page. Users can also play games for a chance to win more credits and keep
+            going without immediately buying again.
           </p>
-          <div class="spec-row"><span class="text-mono-xs">Low-Balance</span><span class="text-mono-xs c-aqua">SUGGEST + REUSE</span></div>
-          <div class="spec-row"><span class="text-mono-xs">Checkout</span><span class="text-mono-xs">URL + QR</span></div>
-          <div class="spec-row"><span class="text-mono-xs">States</span><span class="text-mono-xs c-lime">PAID / EXPIRED / REVIEW</span></div>
+          <div class="spec-row"><span class="text-mono-xs">GAMES</span><span class="text-mono-xs c-aqua">HORSE / BLACKJACK / ROULETTE / MORE</span></div>
+          <div class="spec-row"><span class="text-mono-xs">OUTCOME</span><span class="text-mono-xs">WIN OR LOSE CREDITS</span></div>
+          <div class="spec-row"><span class="text-mono-xs">MODE</span><span class="text-mono-xs c-lime">OPTIONAL, NOT REQUIRED</span></div>
         </article>
 
         <article class="card">
-          <div class="tag" style="border-color:var(--grey-mid); color:var(--grey-light);">FOUNDER MODE</div>
-          <h2 class="card-title">Pitch Narrative</h2>
+          <div class="tag" style="border-color:var(--grey-mid); color:var(--grey-light);">OPERATIONAL UX</div>
+          <h2 class="card-title">Clear balance. Clear status. Clear next step.</h2>
           <p class="card-copy">
-            A 12-slide founder deck mirrors proven high-conviction story structure while staying grounded in OpenVegas
-            product and billing mechanics.
+            Wallet, top-ups, activity, and game outcomes are shown in one place so users always know what they have
+            left and what they can do next.
           </p>
-          <div class="spec-row"><span class="text-mono-xs">Deck Model</span><span class="text-mono-xs c-aqua">AIRBNB-STYLE ARC</span></div>
-          <div class="spec-row"><span class="text-mono-xs">Slide Nav</span><span class="text-mono-xs">ARROWS + KEYBOARD</span></div>
-          <div class="spec-row"><span class="text-mono-xs">Citations</span><span class="text-mono-xs c-lime">MARKET DATA REGISTRY</span></div>
+          <div class="spec-row"><span class="text-mono-xs">BALANCE</span><span class="text-mono-xs c-aqua">LIVE</span></div>
+          <div class="spec-row"><span class="text-mono-xs">HISTORY</span><span class="text-mono-xs">TOP-UPS + GAMEPLAY</span></div>
+          <div class="spec-row"><span class="text-mono-xs">STATES</span><span class="text-mono-xs c-lime">PAID / FAILED / WON / LOST</span></div>
         </article>
       </section>
 
       <section class="footer-meta">
         <div>
-          <div class="text-mono-xs">START HERE</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/how-it-works</div>
+          <div class="text-mono-xs">DIRECT PATH</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">BUY CREDITS -> REDEEM FOR COMPUTE</div>
         </div>
         <div>
-          <div class="text-mono-xs">BILLING</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/balance</div>
+          <div class="text-mono-xs">GAME PATH</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">PLAY FOR A CHANCE TO WIN MORE</div>
         </div>
         <div>
-          <div class="text-mono-xs">CHECKOUT</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">/ui/balance#payments</div>
+          <div class="text-mono-xs">BALANCE PATH</div>
+          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">TRACK TOP-UPS, GAMEPLAY, AND STATUS</div>
         </div>
         <div>
-          <div class="text-mono-xs">FOUNDER DECK</div>
-          <div class="text-mono-sm c-aqua" style="margin-top:.5rem;">/ui/slidedeck/01-cover.html</div>
+          <div class="text-mono-xs">RUNTIME POTENTIAL</div>
+          <div class="text-mono-sm c-aqua" style="margin-top:.5rem;">IN SOME USAGE PATTERNS, 3X+ VS DIRECT SPEND</div>
         </div>
       </section>
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js";
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20260330";
       installAssetGuard();
       renderTopNav("siteNav");
       renderFounderLinks("founderLinks");

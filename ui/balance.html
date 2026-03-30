@@ -7,8 +7,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/ui/assets/theme.css" />
-    <link rel="stylesheet" href="/ui/assets/layout.css" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
     <style>
       .balance-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; margin-top: 1rem; }
       .subnav { position: sticky; top: 92px; align-self: start; min-height: auto; padding: 1rem; }
@@ -39,8 +40,9 @@
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"></div>
+        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
         <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
     </nav>
 
@@ -57,7 +59,10 @@
         <div class="text-mono-xs">AUTH REQUIRED</div>
         <h2 class="card-title">Sign in to view billing data</h2>
         <p class="text-mono-sm">This page is available after authentication.</p>
-        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fbalance">OpenVegas login</a></div>
+        <div class="cta-row">
+          <a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fbalance">OpenVegas login</a>
+          <a id="signupLink" class="btn" href="/ui/login?mode=signup&amp;next=%2Fui%2Fbalance">OpenVegas signup</a>
+        </div>
       </section>
 
       <section id="authContent" hidden>
@@ -75,7 +80,6 @@
             <article id="overview" class="card">
               <div class="text-mono-xs">AVAILABLE BALANCE</div>
               <div id="balanceV" class="metric">--</div>
-              <div class="text-mono-sm" style="margin-bottom:.5rem;">Ready for spend</div>
               <div id="balanceMeta" class="text-mono-sm">loading...</div>
               <p class="card-copy" style="margin-top:.8rem; margin-bottom:0;">Use balance thresholds to avoid surprise interruptions in active workflows.</p>
             </article>
@@ -86,29 +90,19 @@
               <p class="card-copy">OpenVegas makes it easier to add funds, review payment state, and move from one-off checkout events to a more continuous operating balance.</p>
               <div class="cta-row">
                 <button id="createCheckout" class="btn btn-primary" type="button">Top up now</button>
-                <button id="checkSuggest" class="btn" type="button">Enable auto top-up (preview)</button>
-              </div>
-              <div class="mini-grid" style="margin-top:12px;">
-                <div>
-                  <div class="text-mono-xs">ADD FUNDS TO KEEP RUNTIME AVAILABLE</div>
-                  <p id="checkoutMeta" class="text-mono-sm">No checkout yet.</p>
-                  <a id="checkoutUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
-                </div>
-                <div>
-                  <div class="text-mono-xs">SUGGESTION OUTPUT</div>
-                  <pre id="suggestOut" class="text-mono-sm" style="white-space:pre-wrap; margin:0;">No suggestion check yet.</pre>
-                </div>
+                <button id="openSubscription" class="btn" type="button">Monthly subscription</button>
               </div>
             </article>
 
             <article id="transactions" class="card">
               <div class="text-mono-xs">TRANSACTIONS</div>
               <h2 class="card-title">Funding and balance history.</h2>
-              <p class="card-copy">Review completed top-ups, pending states, failed attempts, and wallet activity in one place.</p>
+              <p class="card-copy">Review paid and failed top-ups plus gameplay wins and losses.</p>
+              <p id="topupFx" class="text-mono-sm" style="margin:0 0 .9rem 0;">Conversion rate: loading...</p>
               <div class="table-shell">
                 <table>
                   <thead>
-                    <tr><th>Time</th><th>Type</th><th>Amount</th><th>Status</th></tr>
+                    <tr><th>TIME</th><th>TYPE</th><th>AMOUNT</th><th>STATUS</th></tr>
                   </thead>
                   <tbody id="txBody">
                     <tr><td colspan="4" class="text-mono-sm">Loading...</td></tr>
@@ -126,8 +120,8 @@
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js";
-      import { apiJson, authProbe, clearBrowserToken, getLoginHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js";
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
+      import { apiJson, authProbe, clearBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js";
 
       installAssetGuard();
       renderTopNav("siteNav");
@@ -135,16 +129,25 @@
 
       const loginLink = byId("loginLink");
       if (loginLink) loginLink.href = getLoginHref("/ui/balance");
+      const signupLink = byId("signupLink");
+      if (signupLink) signupLink.href = getSignupHref("/ui/balance");
 
       function renderBalance(data) {
         const raw = String(data?.balance ?? "0");
         const n = Number.parseFloat(raw);
-        byId("balanceV").textContent = Number.isFinite(n) ? `${n.toFixed(6)} $V` : `${raw} $V`;
+        byId("balanceV").textContent = Number.isFinite(n) ? `${n.toFixed(2)} $V` : `${raw} $V`;
         byId("balanceMeta").textContent = `tier=${data?.tier ?? "free"}`;
       }
 
       function renderHistory(data) {
         const entries = Array.isArray(data?.entries) ? data.entries : [];
+        const conv = data?.conversion || {};
+        const fx = byId("topupFx");
+        if (fx) {
+          const vPerUsd = conv?.v_per_usd || "?";
+          const usdPerV = conv?.usd_per_v || "?";
+          fx.textContent = `Conversion rate: 1 USD = ${vPerUsd} $V · 1 $V = ${usdPerV} USD`;
+        }
         const body = byId("txBody");
         if (!body) return;
         if (!entries.length) {
@@ -153,8 +156,20 @@
         }
         body.innerHTML = entries
           .map((e) => {
-            const t = String(e.created_at || "").replace("T", " ").slice(0, 19);
-            return `<tr><td>${t}</td><td>${e.entry_type || ""}</td><td>${e.amount || ""}</td><td>${e.status || "n/a"}</td></tr>`;
+            const t = String(e.time || "").replace("T", " ").slice(0, 19);
+            const kind = String(e.type || "top_up");
+            let amount = "";
+            if (kind === "gameplay") {
+              const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+              const n = Number.parseFloat(String(vv));
+              const signed = Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(2)}` : String(vv);
+              amount = `${signed} $V`;
+            } else {
+              const usd = e.amount_usd ? `$${e.amount_usd}` : "$0.00";
+              const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+              amount = `${usd} · +${vv} $V`;
+            }
+            return `<tr><td>${t}</td><td>${kind}</td><td>${amount}</td><td>${e.status || "n/a"}</td></tr>`;
           })
           .join("");
       }
@@ -162,7 +177,7 @@
       async function loadWallet() {
         const balanceData = await apiJson("/wallet/balance", { method: "GET" });
         renderBalance(balanceData);
-        const historyData = await apiJson("/wallet/history", { method: "GET" });
+        const historyData = await apiJson("/billing/activity?limit=50", { method: "GET" });
         renderHistory(historyData);
       }
 
@@ -174,48 +189,26 @@
           await loadWallet();
         });
 
-        byId("logoutBtn")?.addEventListener("click", () => {
+        byId("logoutBtn")?.addEventListener("click", async () => {
+          try {
+            await fetch("/ui/auth/logout", {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+            });
+          } catch (_) {
+            // Network logout is best-effort; still clear local auth state.
+          }
           clearBrowserToken();
           window.location.assign(getLoginHref("/ui/balance"));
         });
 
-        byId("createCheckout")?.addEventListener("click", async () => {
-          const out = byId("checkoutMeta");
-          const link = byId("checkoutUrl");
-          out.textContent = "creating...";
-          try {
-            const data = await apiJson("/billing/topups/checkout", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ amount_usd: "20.00" }),
-            });
-            out.textContent = `topup_id=${data.topup_id} status=${data.status}`;
-            if (data.checkout_url) {
-              link.hidden = false;
-              link.href = data.checkout_url;
-              link.textContent = data.checkout_url;
-            }
-            if (data.topup_id) {
-              out.insertAdjacentHTML("beforeend", ` · <a class="checkout-link" href="/ui/topup/${data.topup_id}">open status page</a>`);
-            }
-          } catch (err) {
-            out.textContent = String(err);
-          }
+        byId("createCheckout")?.addEventListener("click", () => {
+          window.location.assign("/ui/topup-checkout");
         });
 
-        byId("checkSuggest")?.addEventListener("click", async () => {
-          const out = byId("suggestOut");
-          out.textContent = "checking...";
-          try {
-            const data = await apiJson("/billing/topups/suggest", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ suggested_topup_usd: "20.00" }),
-            });
-            out.textContent = JSON.stringify(data, null, 2);
-          } catch (err) {
-            out.textContent = String(err);
-          }
+        byId("openSubscription")?.addEventListener("click", () => {
+          window.location.assign("/ui/subscription");
         });
       }
 

@@ -1,4 +1,33 @@
-const BROWSER_TOKEN_KEY = "openvegas_browser_bearer_token";
+let accessToken = "";
+let accessExpUnix = 0;
+let refreshInFlight = null;
+let bootstrapAttempted = false;
+let walletBootstrapDone = false;
+let authState = "signed_out"; // signed_out | refreshing | signed_in
+let authStateVersion = 0;
+const authStateListeners = new Set();
+
+function nowUnix() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function setAuthState(next) {
+  authStateVersion += 1;
+  authState = next;
+  for (const listener of authStateListeners) {
+    try {
+      listener({ authState, version: authStateVersion });
+    } catch {
+      // Best-effort callback fanout.
+    }
+  }
+}
+
+export function subscribeAuthState(listener) {
+  if (typeof listener !== "function") return () => {};
+  authStateListeners.add(listener);
+  return () => authStateListeners.delete(listener);
+}
 
 function normalizeToken(raw) {
   const v = String(raw || "").trim();
@@ -6,26 +35,124 @@ function normalizeToken(raw) {
   return v.toLowerCase().startsWith("bearer ") ? v.slice(7).trim() : v;
 }
 
-export function getBrowserToken() {
+function normalizeExpiresAt(raw) {
+  const n = Number(raw || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+function setAccessToken(rawToken, expiresAtUnix = 0) {
+  accessToken = normalizeToken(rawToken);
+  accessExpUnix = normalizeExpiresAt(expiresAtUnix);
+  setAuthState(accessToken ? "signed_in" : "signed_out");
+}
+
+function emit_metric(_name, _tags) {
+  // Browser-side metric emission is optional; server refresh route records canonical metrics.
+}
+
+function expiresSoon(leewaySec = 300) {
+  if (!accessToken) return true;
+  if (!accessExpUnix) return true;
+  return (accessExpUnix - nowUnix()) <= leewaySec;
+}
+
+async function refreshAccessToken(trigger = "retry_401", opts = {}) {
+  const timeoutMs = Number(opts.timeoutMs || 4000);
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    setAuthState("refreshing");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch("/ui/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "X-OpenVegas-Refresh-Trigger": trigger,
+        },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        emit_metric("auth_refresh_attempt_total", {
+          surface: "browser",
+          trigger,
+          outcome: "failure",
+          reason: "refresh_rejected",
+        });
+        throw new Error(`refresh_failed_${res.status}`);
+      }
+      const body = await res.json().catch(() => ({}));
+      const token = normalizeToken(body?.access_token);
+      const expUnix = normalizeExpiresAt(body?.expires_at);
+      if (!token || !expUnix) {
+        emit_metric("auth_refresh_attempt_total", {
+          surface: "browser",
+          trigger,
+          outcome: "failure",
+          reason: "refresh_malformed",
+        });
+        throw new Error("refresh_malformed");
+      }
+      setAccessToken(token, expUnix);
+      emit_metric("auth_refresh_attempt_total", {
+        surface: "browser",
+        trigger,
+        outcome: "success",
+      });
+      return token;
+    } catch (err) {
+      if (String(err).includes("AbortError")) {
+        emit_metric("auth_refresh_attempt_total", {
+          surface: "browser",
+          trigger,
+          outcome: "failure",
+          reason: "refresh_timeout",
+        });
+        throw new Error("refresh_timeout");
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
   try {
-    return normalizeToken(window.localStorage.getItem(BROWSER_TOKEN_KEY) || "");
-  } catch {
-    return "";
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
 }
 
-export function setBrowserToken(rawToken) {
+export function getBrowserToken() {
+  return accessToken;
+}
+
+export function setBrowserToken(rawToken, expiresAtUnix = 0) {
   const token = normalizeToken(rawToken);
   if (!token) return false;
-  window.localStorage.setItem(BROWSER_TOKEN_KEY, token);
+  setAccessToken(token, expiresAtUnix);
   return true;
 }
 
 export function clearBrowserToken() {
+  accessToken = "";
+  accessExpUnix = 0;
+  walletBootstrapDone = false;
+  setAuthState("signed_out");
+}
+
+export async function bootstrapBrowserSession() {
+  if (bootstrapAttempted) return Boolean(accessToken);
+  bootstrapAttempted = true;
   try {
-    window.localStorage.removeItem(BROWSER_TOKEN_KEY);
+    await refreshAccessToken("bootstrap", { timeoutMs: 2500 });
+    return true;
   } catch {
-    // Ignore storage errors.
+    clearBrowserToken();
+    return false;
   }
 }
 
@@ -35,6 +162,12 @@ export function getLoginHref(nextPath) {
   return `/ui/login?next=${encodeURIComponent(next)}`;
 }
 
+export function getSignupHref(nextPath) {
+  const fallback = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const next = String(nextPath || fallback || "/ui/balance");
+  return `/ui/login?mode=signup&next=${encodeURIComponent(next)}`;
+}
+
 export function authHeaders(extraHeaders = {}) {
   const headers = new Headers(extraHeaders || {});
   const token = getBrowserToken();
@@ -42,12 +175,49 @@ export function authHeaders(extraHeaders = {}) {
   return headers;
 }
 
-export async function apiFetch(url, init = {}) {
-  const requestInit = {
+function withAuthInit(init = {}) {
+  return {
     ...init,
+    credentials: init.credentials || "same-origin",
     headers: authHeaders(init.headers),
   };
-  return fetch(url, requestInit);
+}
+
+export async function apiFetch(url, init = {}) {
+  if (expiresSoon(300)) {
+    try {
+      await refreshAccessToken("proactive");
+    } catch {
+      // Allow request path + retry logic to decide final auth result.
+    }
+  }
+
+  const first = await fetch(url, withAuthInit(init));
+  if (first.status !== 401 && first.status !== 403) return first;
+
+  try {
+    await refreshAccessToken("retry_401");
+  } catch {
+    clearBrowserToken();
+    return first;
+  }
+  return fetch(url, withAuthInit(init));
+}
+
+async function ensureWalletBootstrap() {
+  if (walletBootstrapDone) return;
+  const res = await apiFetch("/wallet/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (res.status === 401 || res.status === 403) {
+    clearBrowserToken();
+    throw new Error("wallet_bootstrap_unauthorized");
+  }
+  if (!res.ok) {
+    throw new Error(`wallet_bootstrap_failed:${res.status}`);
+  }
+  walletBootstrapDone = true;
 }
 
 export async function apiJson(url, init = {}) {
@@ -63,13 +233,18 @@ export async function apiJson(url, init = {}) {
 }
 
 export async function authProbe() {
-  const token = getBrowserToken();
-  if (!token) {
+  if (!accessToken || expiresSoon(0)) {
+    await bootstrapBrowserSession();
+  }
+  if (!accessToken) {
     return { ok: false, status: 401, data: null, reason: "missing_token" };
   }
 
+  await ensureWalletBootstrap();
+
   const res = await apiFetch("/wallet/balance", { method: "GET" });
   if (res.status === 401 || res.status === 403) {
+    clearBrowserToken();
     return { ok: false, status: res.status, data: null, reason: "unauthorized" };
   }
   if (!res.ok) {

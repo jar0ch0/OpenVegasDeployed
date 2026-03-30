@@ -319,16 +319,25 @@ class WalletService:
             )
             await self._execute(entry, tx=own_tx)
 
-    async def fund_from_card(self, account_id: str, amount_v: Decimal, reference_id: str, *, tx=None):
+    async def fund_from_card(
+        self,
+        account_id: str,
+        amount_v: Decimal,
+        reference_id: str,
+        *,
+        entry_type: str = "fiat_topup",
+        debit_account: str = "fiat_reserve",
+        tx=None,
+    ):
         """Credit wallet from card purchase settlement.
 
-        Uses the fiat_reserve system account as balancing source.
+        Uses a system reserve as balancing source.
         """
         entry = LedgerEntry(
-            debit_account="fiat_reserve",
+            debit_account=debit_account,
             credit_account=account_id,
             amount=self._money(amount_v),
-            entry_type="fiat_topup",
+            entry_type=entry_type,
             reference_id=reference_id,
         )
         await self._execute(entry, tx=tx)

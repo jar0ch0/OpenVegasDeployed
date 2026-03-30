@@ -13,8 +13,8 @@
   top: 0;
   z-index: 20;
   backdrop-filter: blur(8px);
-  background: rgba(4, 4, 4, 0.82);
-  border-bottom: 1px solid var(--grey-dark);
+  background: var(--nav-bg);
+  border-bottom: 1px solid var(--line);
 }
 
 .brand-link {
@@ -95,12 +95,12 @@
 .card {
   padding: 2rem;
   min-height: 280px;
-  background: rgba(255, 255, 255, 0.01);
-  border-bottom: 1px solid var(--grey-dark);
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--line);
 }
 
 .card:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--card-bg-hover);
 }
 
 .card-title {
@@ -225,7 +225,7 @@
   border: 1px solid var(--grey-dark);
   padding: 1rem;
   margin-top: 1rem;
-  background: rgba(255, 255, 255, 0.01);
+  background: var(--surface-1);
 }
 
 .table-shell {

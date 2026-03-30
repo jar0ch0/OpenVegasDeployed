@@ -182,3 +182,23 @@ async def test_verify_rejects_demo_round(monkeypatch):
     with pytest.raises(HTTPException) as e:
         await games_routes.verify_game("f932a8a1-6f0a-4cb2-816b-3ea2f2607fc4", user={"user_id": "u1"})
     assert e.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_play_rejects_below_min_wager_for_real_paths(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_MIN_GAME_WAGER_V", "50")
+    monkeypatch.setitem(games_routes.GAMES, "skillshot", _FakeGame)
+
+    class _Fraud:
+        async def check_bet(self, _user_id):
+            return None
+
+    monkeypatch.setattr(games_routes, "get_fraud_engine", lambda: _Fraud())
+    monkeypatch.setattr(games_routes, "get_wallet", lambda: _FakeWallet())
+    monkeypatch.setattr(games_routes, "get_db", lambda: _FakeDB())
+
+    req = games_routes.PlayRequest(amount=1, type="win")
+    with pytest.raises(HTTPException) as e:
+        await games_routes.play_game("skillshot", req, user={"user_id": "u-real"})
+    assert e.value.status_code == 400
+    assert "at least" in str(e.value.detail).lower()

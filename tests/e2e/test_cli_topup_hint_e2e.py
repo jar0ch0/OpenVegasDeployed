@@ -172,8 +172,8 @@ def test_render_topup_hint_qr_rendered_when_tty_and_width_fit(monkeypatch):
             return True
 
     monkeypatch.setattr(chat_renderer.sys, "stdout", _TTY())
-    monkeypatch.setattr(chat_renderer, "qr_width", lambda _value: 10)
-    monkeypatch.setattr(chat_renderer, "qr_half_block", lambda _value: "QRLINE1\nQRLINE2")
+    monkeypatch.setattr(chat_renderer, "qr_width", lambda _value, border=0: 10)
+    monkeypatch.setattr(chat_renderer, "qr_half_block", lambda _value, border=0: "QRLINE1\nQRLINE2")
     console = Console(file=io.StringIO(), record=True, width=120, force_terminal=False)
     chat_renderer.render_topup_hint(
         console,
@@ -197,8 +197,8 @@ def test_render_topup_hint_qr_skipped_when_terminal_too_narrow(monkeypatch):
             return True
 
     monkeypatch.setattr(chat_renderer.sys, "stdout", _TTY())
-    monkeypatch.setattr(chat_renderer, "qr_width", lambda _value: 10_000)
-    monkeypatch.setattr(chat_renderer, "qr_half_block", lambda _value: "QRLINE1\nQRLINE2")
+    monkeypatch.setattr(chat_renderer, "qr_width", lambda _value, border=0: 10_000)
+    monkeypatch.setattr(chat_renderer, "qr_half_block", lambda _value, border=0: "QRLINE1\nQRLINE2")
     console = Console(file=io.StringIO(), record=True, width=60, force_terminal=False)
     chat_renderer.render_topup_hint(
         console,

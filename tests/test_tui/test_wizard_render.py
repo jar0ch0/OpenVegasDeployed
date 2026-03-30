@@ -21,20 +21,6 @@ class _ClientPlay:
         }
 
 
-class _ClientDemo:
-    async def play_game_demo(self, game: str, payload: dict) -> dict:
-        return {
-            "game_id": "g-demo",
-            "bet_amount": "1",
-            "payout": "1.8",
-            "net": "0.8",
-            "server_seed_hash": "demo123",
-            "provably_fair": False,
-            "demo_mode": True,
-            "outcome_data": {},
-        }
-
-
 class _FakeRenderer:
     async def render(self, _result, _console):
         return None
@@ -61,30 +47,6 @@ async def test_play_invokes_horse_renderer(monkeypatch):
     assert calls["renderer"] is _FakeRenderer
     assert calls["result"].game_id == "g123"
     assert "LIVE MODE" in calls["output"]
-
-
-@pytest.mark.asyncio
-async def test_demo_play_invokes_horse_renderer_and_marks_noncanonical(monkeypatch):
-    app = OpenVegasWizard()
-    app.state = WizardState(action="Play (Demo Win)", game="horse", amount="1", horse="1", bet_type="win")
-    app.client = _ClientDemo()
-
-    calls: dict = {}
-
-    async def _fake_render(renderer_cls, gr):
-        calls["renderer"] = renderer_cls
-        calls["result"] = gr
-
-    monkeypatch.setattr(app, "_renderer_for", lambda _game: _FakeRenderer)
-    monkeypatch.setattr(app, "_render_game", _fake_render)
-    monkeypatch.setattr(app, "_set_output", lambda message: calls.setdefault("output", message))
-
-    await app._run_action()
-
-    assert calls["renderer"] is _FakeRenderer
-    assert calls["result"].game_id == "g-demo"
-    assert "DEMO MODE (canonical: false)" in calls["output"]
-    assert "--demo" in calls["output"]
 
 
 @pytest.mark.asyncio

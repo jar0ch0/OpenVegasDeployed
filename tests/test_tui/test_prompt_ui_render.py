@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import pytest
 from rich.console import Console
+from rich.panel import Panel
 
+from openvegas.casino.constants import HIDDEN_CARD_TOKEN
 from openvegas.tui.prompt_ui import InlinePromptUI, RenderOptions, execute_render
 
 
@@ -121,7 +124,7 @@ async def test_run_once_no_render_skips_renderer(monkeypatch):
     )
     ui.state.action = "Play"
     ui.state.game = "skillshot"
-    ui.state.amount = "1"
+    ui.state.amount = "50"
 
     async def _boom(*_args, **_kwargs):
         raise AssertionError("execute_render should not be called in no-render mode")
@@ -144,7 +147,7 @@ async def test_run_once_timeout_then_next_action_still_works(monkeypatch):
     )
     ui.state.action = "Play"
     ui.state.game = "skillshot"
-    ui.state.amount = "1"
+    ui.state.amount = "50"
     ui.state.horse = "99"  # hidden for skillshot and should not be sent
 
     calls = {"n": 0}
@@ -157,6 +160,10 @@ async def test_run_once_timeout_then_next_action_still_works(monkeypatch):
 
     monkeypatch.setattr("openvegas.tui.prompt_ui.execute_render", _fake_execute_render)
     monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": False})
+    async def _fake_interactive(_self, _console):
+        return 20
+
+    monkeypatch.setattr("openvegas.games.skill_shot.SkillShotGame.render_interactive", _fake_interactive)
 
     first = await ui.run_once()
     second = await ui.run_once()
@@ -164,8 +171,8 @@ async def test_run_once_timeout_then_next_action_still_works(monkeypatch):
     assert "Render timed out" in first
     assert "Showing result summary only" in first
     assert "LIVE MODE" in second
-    assert ui.client.payloads[0] == {"amount": 1.0}
-    assert ui.client.payloads[1] == {"amount": 1.0}
+    assert ui.client.payloads[0] == {"amount": 50.0, "stop_position": 20}
+    assert ui.client.payloads[1] == {"amount": 50.0, "stop_position": 20}
 
 
 @pytest.mark.asyncio
@@ -178,7 +185,7 @@ async def test_run_once_horse_uses_quote_play_payload(monkeypatch):
     ui.state.action = "Play"
     ui.state.game = "horse"
     ui.state.bet_type = "win"
-    ui.state.amount = "20"
+    ui.state.amount = "50"
     ui.state.horse = "1"
     ui.state.horse_quote_id = "q-1"
     ui.state.horse_quote_board_hash = "board-hash"
@@ -205,6 +212,119 @@ async def test_run_once_horse_uses_quote_play_payload(monkeypatch):
     assert len(ui.client.calls) == 1
     assert ui.client.calls[0]["quote_id"] == "q-1"
     assert ui.client.calls[0]["horse"] == 1
+
+
+def test_blackjack_round_state_handles_hidden_token_without_crash():
+    ui = InlinePromptUI(client=_FakeClientPlay(), console=Console())
+    state = {
+        "player": [["10", "H"], ["7", "C"]],
+        "dealer": [["9", "S"], HIDDEN_CARD_TOKEN],
+    }
+    out = ui._render_round_state("blackjack", state, "awaiting_action")
+    assert "PLAYER" in out
+    assert "DEALER" in out
+
+
+def test_round_state_hides_internal_state_copy_for_roulette_and_slots():
+    ui = InlinePromptUI(client=_FakeClientPlay(), console=Console())
+    roulette_out = ui._render_round_state(
+        "roulette",
+        {"bet_type": "bet_red"},
+        "awaiting_action",
+    )
+    slots_out = ui._render_round_state(
+        "slots",
+        {},
+        "awaiting_action",
+    )
+    assert "State:" not in roulette_out
+    assert "Next:" not in roulette_out
+    assert roulette_out == "Bet selected: RED"
+    assert "State:" not in slots_out
+    assert "Next:" not in slots_out
+    assert slots_out == "Ready to spin."
+
+
+def test_round_state_hides_internal_state_copy_for_blackjack():
+    ui = InlinePromptUI(client=_FakeClientPlay(), console=Console())
+    state = {
+        "player": [["10", "H"], ["7", "C"]],
+        "dealer": [["9", "S"], ["5", "D"]],
+    }
+    out = ui._render_round_state("blackjack", state, "awaiting_action")
+    assert "State:" not in out
+    assert "PLAYER" in out
+    assert "DEALER" in out
+
+
+class _FakeHumanClientRouletteSpin:
+    def __init__(self):
+        self.actions = []
+
+    async def human_casino_start_session(self, **kwargs):
+        _ = kwargs
+        return {"casino_session_id": "s1"}
+
+    async def human_casino_start_round(self, **kwargs):
+        _ = kwargs
+        return {
+            "round_id": "r1",
+            "current_state": "awaiting_action",
+            "state": {"bet_type": "bet_red"},
+            "valid_actions": ["spin"],
+        }
+
+    async def human_casino_action(self, **kwargs):
+        self.actions.append(kwargs.get("action"))
+        return {
+            "round_id": "r1",
+            "current_state": "resolvable",
+            "state": {"bet_type": "bet_red"},
+            "valid_actions": [],
+        }
+
+    async def human_casino_resolve(self, **kwargs):
+        _ = kwargs
+        return {
+            "outcome": {"result": 12, "bet_type": "bet_red", "hit": True},
+            "payout_v": "100.000000",
+            "net_v": "50.000000",
+        }
+
+
+@pytest.mark.asyncio
+async def test_roulette_autospin_skips_manual_prompt(monkeypatch):
+    ui = InlinePromptUI(client=_FakeHumanClientRouletteSpin(), console=Console())
+    ui.state.game = "roulette"
+    monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": False})
+
+    out = await ui._run_human_card_round(stake=Decimal("50"))
+    assert "Round ID: r1" in out
+    assert ui.client.actions == ["spin"]
+
+
+@pytest.mark.asyncio
+async def test_roulette_round_state_panel_not_duplicated_for_same_content(monkeypatch):
+    ui = InlinePromptUI(client=_FakeHumanClientRouletteSpin(), console=Console(record=True))
+    ui.state.game = "roulette"
+    monkeypatch.setattr("openvegas.tui.prompt_ui.load_config", lambda: {"animation": False})
+
+    round_state_calls = {"count": 0}
+    original_print = ui.console.print
+
+    def _capture_print(*args, **kwargs):
+        if args and isinstance(args[0], Panel):
+            panel = args[0]
+            title = panel.title.plain if hasattr(panel.title, "plain") else str(panel.title or "")
+            if title == "Round State":
+                round_state_calls["count"] += 1
+        return original_print(*args, **kwargs)
+
+    monkeypatch.setattr(ui.console, "print", _capture_print)
+
+    out = await ui._run_human_card_round(stake=Decimal("50"))
+    assert "Round ID: r1" in out
+    assert round_state_calls["count"] == 1
 
 
 def test_run_uses_shared_result_renderer_for_win(monkeypatch):

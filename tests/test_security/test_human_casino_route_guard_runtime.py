@@ -80,3 +80,34 @@ def test_human_casino_undefined_table_maps_to_503(monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["detail"] == casino_human.HUMAN_CASINO_UNAVAILABLE_DETAIL
+
+
+def test_human_casino_start_round_rejects_below_min_wager_before_service_call(monkeypatch):
+    monkeypatch.setenv("CASINO_HUMAN_ENABLED", "1")
+    monkeypatch.setenv("OPENVEGAS_MIN_GAME_WAGER_V", "50")
+
+    class _Service:
+        def __init__(self):
+            self.calls = 0
+
+        async def start_round(self, **_kwargs):
+            self.calls += 1
+            return SimpleNamespace(status_code=200, body_text='{"ok":true}')
+
+    svc = _Service()
+    monkeypatch.setattr(casino_human, "get_human_casino_service", lambda: svc)
+
+    client = TestClient(_app_with_router())
+    response = client.post(
+        "/casino/human/rounds/start",
+        json={
+            "casino_session_id": "s1",
+            "game_code": "roulette",
+            "wager_v": 1,
+            "idempotency_key": "idem-low",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "at least" in str(response.json().get("detail", "")).lower()
+    assert svc.calls == 0

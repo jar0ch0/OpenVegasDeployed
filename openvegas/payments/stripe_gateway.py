@@ -101,6 +101,37 @@ class StripeGateway:
             },  # persisted onto Subscription for customer.subscription.* webhooks
         )
 
+    def create_user_subscription_checkout(
+        self,
+        *,
+        customer_id: str,
+        user_id: str,
+        monthly_amount_usd: Decimal,
+        checkout_attempt_id: str,
+    ) -> dict:
+        cents = int((monthly_amount_usd * Decimal("100")).quantize(Decimal("1")))
+        return self._session_create(
+            idempotency_key=f"user-sub-checkout:{user_id}:{checkout_attempt_id}",
+            mode="subscription",
+            customer=customer_id,
+            client_reference_id=user_id,
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": "OpenVegas Monthly Auto Top-up"},
+                    "recurring": {"interval": "month", "interval_count": 1},
+                    "unit_amount": cents,
+                },
+                "quantity": 1,
+            }],
+            success_url=os.environ["CHECKOUT_SUCCESS_URL"],
+            cancel_url=os.environ["CHECKOUT_CANCEL_URL"],
+            metadata={"user_id": user_id, "purpose": "user_subscription"},
+            subscription_data={
+                "metadata": {"user_id": user_id, "purpose": "user_subscription"},
+            },
+        )
+
     def create_billing_portal(self, *, customer_id: str, flow_type: str | None = None, subscription_id: str | None = None) -> str:
         payload: dict[str, Any] = {
             "customer": customer_id,

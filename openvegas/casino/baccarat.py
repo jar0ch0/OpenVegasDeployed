@@ -54,6 +54,8 @@ class BaccaratGame(BaseCasinoGame):
 
             pt = hand_total(state["player"])
             bt = hand_total(state["banker"])
+            state["player_total"] = pt
+            state["banker_total"] = bt
 
             # Natural — no third card
             if pt >= 8 or bt >= 8:
@@ -81,6 +83,8 @@ class BaccaratGame(BaseCasinoGame):
                 if bt <= 5:
                     state["banker"].append(shoe.pop())
 
+            state["player_total"] = hand_total(state["player"])
+            state["banker_total"] = hand_total(state["banker"])
             state["phase"] = "resolved"
         return state
 
@@ -90,7 +94,13 @@ class BaccaratGame(BaseCasinoGame):
         bet = state["bet_type"]
         pc = cards_str(state["player"])
         bc = cards_str(state["banker"])
-        data = {"player_total": pt, "banker_total": bt, "player_cards": pc, "banker_cards": bc}
+        data = {
+            "bet_type": bet,
+            "player_total": pt,
+            "banker_total": bt,
+            "player_cards": pc,
+            "banker_cards": bc,
+        }
 
         if pt == bt:
             if bet == "bet_tie":

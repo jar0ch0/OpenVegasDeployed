@@ -36,6 +36,9 @@ class _Placeholder:
     async def fetchrow(self, *a, **kw):
         return None
 
+    async def fetchval(self, *a, **kw):
+        return None
+
     def transaction(self):
         return _TxCtx(self)
 
@@ -112,6 +115,10 @@ class PostgresDB:
         async with self.pool.acquire() as conn:
             return await conn.fetchrow(query, *args)
 
+    async def fetchval(self, query: str, *args):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(query, *args)
+
     def transaction(self):
         return _PoolTxCtx(self.pool)
 
@@ -124,6 +131,7 @@ class FeatureFlags:
     human_casino_enabled: bool
     mint_audit_enabled: bool
     context_enabled: bool
+    trusted_proxy_headers_enabled: bool
 
 
 _db: Any = _Placeholder()
@@ -141,6 +149,7 @@ def current_flags() -> FeatureFlags:
         human_casino_enabled=env("CASINO_HUMAN_ENABLED", "0") == "1",
         mint_audit_enabled=env("MINT_AUDIT_ENABLED", "1") == "1",
         context_enabled=env("OPENVEGAS_CONTEXT_ENABLED", "0") == "1",
+        trusted_proxy_headers_enabled=env("OPENVEGAS_TRUSTED_PROXY_HEADERS", "0") == "1",
     )
 
 
@@ -196,6 +205,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_tables(
         db,
         {
+            "profiles",
             "wallet_accounts",
             "ledger_entries",
             "mint_challenges",
@@ -215,6 +225,10 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "018_wrapper_default_foundation")
     await require_migration_min(db, "019_inference_idempotency_and_holds")
     await require_migration_min(db, "028_billing_topup_hardening")
+    await require_migration_min(db, "031_user_subscription_billing")
+    await require_migration_min(db, "032_wallet_bootstrap_and_continuation")
+    await require_migration_min(db, "033_avatar_preferences")
+    await require_migration_min(db, "036_profile_theme_preferences")
 
     await require_tables(
         db,
@@ -229,6 +243,11 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             "wrapper_reward_events",
             "org_runtime_policies",
             "context_retention_policies",
+            "user_subscriptions",
+            "user_starter_grants",
+            "user_continuation_credit",
+            "continuation_claim_idempotency",
+            "continuation_accounting_events",
         },
     )
     await require_columns(
@@ -244,6 +263,10 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("fiat_topups", "manual_reconciliation_required"),
             ("fiat_topups", "manual_reconciliation_reason"),
             ("fiat_topups", "manual_reconciliation_marked_at"),
+            ("profiles", "avatar_id"),
+            ("profiles", "avatar_palette"),
+            ("profiles", "dealer_skin_id"),
+            ("profiles", "theme"),
         },
     )
 

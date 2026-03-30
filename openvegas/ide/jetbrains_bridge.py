@@ -55,6 +55,14 @@ class JetBrainsBridge:
             allow_partial_accept=allow_partial_accept,
         )
 
+    async def show_diff_interactive(
+        self,
+        path: str,
+        new_contents: str,
+        allow_partial_accept: bool = True,
+    ) -> ShowDiffResult:
+        return await self.show_diff(path, new_contents, allow_partial_accept=allow_partial_accept)
+
     async def get_open_files(self) -> list[str]:
         return []
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 from rich.console import Console
 from rich.style import Style
 from rich.text import Text
 
+from openvegas.compact_uuid import encode_compact_uuid
 from openvegas.tui.qr_render import qr_half_block, qr_width
 
 
@@ -65,7 +67,11 @@ def render_topup_hint(console: Console, hint: dict[str, object]) -> None:
     balance_v = str(hint.get("balance_v") or "")
     methods = hint.get("payment_methods_display") or []
     mode = str(hint.get("mode") or "simulated")
-    qr_value = str(hint.get("qr_value") or checkout_url or "")
+    topup_id = str(hint.get("topup_id") or "").strip()
+    app_base = str(os.getenv("APP_BASE_URL", "")).strip().rstrip("/")
+    compact_topup = encode_compact_uuid(topup_id) if topup_id else None
+    short_status = f"{app_base}/r/{compact_topup}" if (app_base and compact_topup) else ""
+    qr_value = str(short_status or hint.get("qr_value") or checkout_url or "")
 
     console.print(Text("  ⚠ Low balance", style="yellow"))
     if balance_v:
@@ -81,9 +87,9 @@ def render_topup_hint(console: Console, hint: dict[str, object]) -> None:
 
     if qr_value and sys.stdout.isatty():
         try:
-            width = qr_width(qr_value)
+            width = qr_width(qr_value, border=0)
             if width + 4 <= console.width:
-                for line in qr_half_block(qr_value).splitlines():
+                for line in qr_half_block(qr_value, border=0).splitlines():
                     console.print(Text(f"    {line}", style=ASSISTANT_TEXT))
         except Exception:
             pass

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import os
 from decimal import Decimal
 from typing import Any
 
@@ -47,11 +48,13 @@ class OrgService:
             "allowed_providers", "allowed_models", "user_daily_cap_usd",
             "byok_fallback_enabled", "boost_enabled", "casino_enabled",
             "casino_agent_max_loss_v", "casino_round_max_wager_v", "casino_round_cooldown_ms",
+            "agent_default_envelope_v", "agent_max_envelope_v", "agent_session_ttl_sec", "agent_infer_enabled",
         }
+        existing = await self._policy_columns()
         sets = []
         params = []
         for key, val in fields.items():
-            if key in allowed:
+            if key in allowed and key in existing:
                 params.append(val)
                 sets.append(f"{key} = ${len(params)}")
         if not sets:
@@ -67,7 +70,14 @@ class OrgService:
         row = await self.db.fetchrow(
             "SELECT * FROM org_policies WHERE org_id = $1", org_id
         )
-        return dict(row) if row else None
+        if not row:
+            return None
+        out = dict(row)
+        out.setdefault("agent_default_envelope_v", Decimal(os.getenv("OPENVEGAS_AGENT_DEFAULT_ENVELOPE_V", "25.0")))
+        out.setdefault("agent_max_envelope_v", Decimal(os.getenv("OPENVEGAS_AGENT_MAX_ENVELOPE_V", "250.0")))
+        out.setdefault("agent_session_ttl_sec", int(os.getenv("OPENVEGAS_AGENT_SESSION_TTL_SECONDS", "1800")))
+        out.setdefault("agent_infer_enabled", True)
+        return out
 
     async def invite_member(self, org_id: str, user_id: str, role: str = "member") -> dict:
         await self.db.execute(
@@ -89,3 +99,21 @@ class OrgService:
         if allowed_models and model not in allowed_models:
             return False
         return True
+
+    async def _policy_columns(self) -> set[str]:
+        try:
+            rows = await self.db.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'org_policies'
+                """
+            )
+            return {str(r["column_name"]) for r in rows}
+        except Exception:
+            return {
+                "allowed_providers", "allowed_models", "user_daily_cap_usd",
+                "byok_fallback_enabled", "boost_enabled", "casino_enabled",
+                "casino_agent_max_loss_v", "casino_round_max_wager_v", "casino_round_cooldown_ms",
+            }

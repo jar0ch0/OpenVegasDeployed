@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | How to Play</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">HOW TO PLAY</div>
+          <h1 class="page-title">OpenVegas quick start for command-line and web play.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Run one command for chat-based gameplay and one command for the browser UI. Use this page as your step-by-step starter guide.</p>
+      </header>
+
+      <section class="card" style="min-height:auto; margin-top:12px; text-align:center;">
+        <div class="text-mono-xs" style="margin-bottom:10px;">VIDEO WALKTHROUGH</div>
+        <div id="howToPlayVideoSlot" style="max-width:840px; margin:0 auto; border:1px solid var(--line); background:var(--surface-1); padding:14px;">
+          <p class="text-mono-sm" style="margin:0;">Video placeholder: paste your video embed or player here when ready.</p>
+        </div>
+      </section>
+
+      <section class="section-grid-2" style="margin-top:12px;">
+        <article class="card border-r">
+          <div class="tag">MAIN COMMANDS</div>
+          <h2 class="card-title">Use these first</h2>
+          <p class="card-copy" style="color:var(--text-main); margin-bottom:8px;">
+            <code>openvegas login</code> to log into the account you created.
+          </p>
+          <p class="card-copy" style="color:var(--text-main); margin-bottom:8px;">
+            <code>openvegas chat</code> launches the terminal agentic workflow you're used to.
+          </p>
+          <p class="card-copy" style="color:var(--text-main); margin-bottom:8px;">
+            <code>openvegas ui</code> launches the guided terminal UI mode.
+          </p>
+          <p class="card-copy" style="margin-bottom:0;">
+            Start with <code>openvegas chat</code> for regular agentic workflow, then use <code>openvegas ui</code> for a guided game flow.
+          </p>
+        </article>
+
+        <article class="card">
+          <div class="tag">WALKTHROUGH</div>
+          <h2 class="card-title">Suggested first run</h2>
+          <div class="spec-row"><span class="text-mono-sm">Step 1</span><span>Run <code>openvegas chat</code> to use the agentic terminal workflow.</span></div>
+          <div class="spec-row"><span class="text-mono-sm">Step 2</span><span>Run <code>openvegas ui</code>.</span></div>
+          <div class="spec-row"><span class="text-mono-sm">Step 3</span><span>Top up credits if needed by selecting 'Balance' option.</span></div>
+          <div class="spec-row"><span class="text-mono-sm">Step 4</span><span>Run <code>openvegas ui</code> again and pick a game.</span></div>
+          <div class="spec-row"><span class="text-mono-sm">Step 5</span><span>Play rounds, then return to UI mode to review status.</span></div>
+        </article>
+      </section>
+
+      <section class="card" style="margin-top:12px; min-height:auto;">
+        <div class="tag">GAME EXAMPLE</div>
+        <h2 class="card-title">Example flow: Roulette session</h2>
+        <div class="spec-row"><span class="text-mono-sm">1</span><span>In terminal, run <code>openvegas ui</code>, pick 'Play'.</span></div>
+        <div class="spec-row"><span class="text-mono-sm">2</span><span>Select roulette (or any other game) and place a bet (example: 50 on red).</span></div>
+        <div class="spec-row"><span class="text-mono-sm">3</span><span>Spin resolves; winnings or loss are applied immediately.</span></div>
+        <div class="spec-row"><span class="text-mono-sm">4</span><span>Run <code>openvegas ui</code> to confirm updated balance and recent activity.</span></div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20260330";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  </body>
+</html>

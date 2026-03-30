@@ -15,14 +15,18 @@ SYMBOL_DISPLAY = {
 
 
 def _sym(name: str, ascii_safe: bool) -> str:
-    d = SYMBOL_DISPLAY.get(name, {"utf": name, "ascii": name})
+    # Unknown symbols are clamped to '?' so fixed-width reel borders never break.
+    d = SYMBOL_DISPLAY.get(name, {"utf": "[dim]?[/dim]", "ascii": "?"})
     return d["ascii"] if ascii_safe else d["utf"]
 
 
 def render_reels(reels: list[str], hit: bool) -> str:
     """Render 3-reel slot machine display."""
     ascii_safe = ascii_safe_mode()
-    s = [_sym(r, ascii_safe) for r in reels]
+    padded = list(reels or [])
+    while len(padded) < 3:
+        padded.append("?")
+    s = [_sym(r, ascii_safe) for r in padded[:3]]
 
     if ascii_safe:
         border = "+---+---+---+"

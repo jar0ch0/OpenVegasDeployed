@@ -29,6 +29,15 @@ class _FakeBridge:
             "timed_out": False,
         }
 
+    async def show_diff_interactive(self, path: str, *_args, **_kwargs):
+        return {
+            "file_path": path,
+            "hunks_total": 1,
+            "decisions": [{"hunk_index": 0, "decision": "rejected"}],
+            "all_accepted": False,
+            "timed_out": False,
+        }
+
     async def get_open_files(self):
         return ["/tmp/a.py"]
 
@@ -113,3 +122,35 @@ def test_ide_message_envelope_dispatch_and_events(monkeypatch):
     assert reg._event_queues[key].qsize() >= 1
     app.dependency_overrides.clear()
 
+
+def test_ide_message_show_diff_interactive_dispatch(monkeypatch):
+    reg = get_bridge_registry()
+    reg._sessions.clear()
+    reg._event_queues.clear()
+    monkeypatch.setattr(ide_bridge_routes, "get_db", lambda: _FakeDB())
+    monkeypatch.setattr(ide_bridge_routes, "create_bridge", lambda *_args, **_kwargs: _FakeBridge())
+    app.dependency_overrides[auth_middleware.get_current_user] = _override_user
+
+    client = TestClient(app)
+    _register(client)
+    msg = client.post(
+        "/ide/message",
+        json={
+            "id": "req-diff",
+            "type": "request",
+            "method": "show_diff_interactive",
+            "params": {
+                "run_id": "r1",
+                "runtime_session_id": "s1",
+                "path": "a.py",
+                "new_contents": "print('x')\n",
+                "allow_partial_accept": True,
+            },
+        },
+    )
+    assert msg.status_code == 200
+    body = msg.json()
+    assert body["error"] is None
+    assert body["result"]["hunks_total"] == 1
+    assert body["result"]["decisions"][0]["decision"] == "rejected"
+    app.dependency_overrides.clear()

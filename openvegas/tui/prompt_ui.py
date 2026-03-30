@@ -6,16 +6,20 @@ import asyncio
 import inspect
 import json
 import uuid
+import webbrowser
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
+from openvegas.casino.constants import HIDDEN_CARD_TOKEN, min_game_wager_v
 from openvegas.client import APIError, OpenVegasClient
+from openvegas.compact_uuid import encode_compact_uuid
 from openvegas.config import load_config
 from openvegas.tui.cards import render_hand
 from openvegas.games.base import GameResult
@@ -23,6 +27,8 @@ from openvegas.games.horse_racing import HorseRacing
 from openvegas.games.skill_shot import SkillShotGame
 from openvegas.tui.confetti import render_result_panel
 from openvegas.tui.hints import verify_hint_for_result
+from openvegas.tui.qr_render import qr_half_block, qr_width
+from openvegas.tui.roulette_renderer import animate_spin as animate_roulette_spin
 from openvegas.tui.roulette_renderer import render_result as render_roulette_result
 from openvegas.tui.slots_renderer import render_reels as render_slots_reels
 from openvegas.tui.wizard_state import WizardState, validate_inputs
@@ -32,14 +38,30 @@ ACTION_CHOICES = [
     "History",
     "Deposit",
     "Play",
-    "Play (Demo Win)",
     "Verify",
-    "Verify (Demo)",
 ]
 GAME_CHOICES = ["horse", "skillshot"]
 CARD_GAME_CHOICES = ["blackjack", "roulette", "slots", "poker", "baccarat"]
 GAME_CHOICES = ["horse", "skillshot", *CARD_GAME_CHOICES]
+GAME_LABELS = {
+    "horse": "horse",
+    "skillshot": "skillshot",
+    "blackjack": "blackjack",
+    "roulette": "roulette",
+    "slots": "slots",
+    "poker": "poker (casino hold'em)",
+    "baccarat": "baccarat",
+}
 HORSE_BET_CHOICES = ["win", "place", "show"]
+MIN_BILLING_USD = Decimal("10")
+MAX_BILLING_USD = Decimal("500")
+
+
+def _format_v_amount(value: Any) -> str:
+    try:
+        return f"{Decimal(str(value)).quantize(Decimal('0.01'))}"
+    except Exception:
+        return "0.00"
 
 
 @dataclass
@@ -125,6 +147,13 @@ async def execute_render(renderer: Any, result: GameResult, console: Console, op
     return {"rendered": True}
 
 
+def _is_simulated_checkout_url(url: str) -> bool:
+    try:
+        return urlparse(str(url or "")).netloc.lower() == "checkout.openvegas.local"
+    except Exception:
+        return False
+
+
 class InlinePromptUI:
     """Sequential, inline wizard-like prompt flow."""
 
@@ -155,12 +184,12 @@ class InlinePromptUI:
 
     def _steps_for_state(self) -> list[str]:
         steps = ["action"]
-        if self.state.action in {"Play", "Play (Demo Win)"}:
+        if self.state.action == "Play":
             steps.append("game")
             if self.state.game == "horse":
                 steps.append("bet_type")
             steps.append("inputs")
-        elif self.state.action in {"Deposit", "Verify", "Verify (Demo)"}:
+        elif self.state.action in {"Deposit", "Verify"}:
             steps.append("inputs")
         steps.append("review")
         return steps
@@ -172,11 +201,13 @@ class InlinePromptUI:
         current: str,
         *,
         allow_back: bool,
+        display_labels: dict[str, str] | None = None,
     ) -> tuple[str | None, str | None]:
         self.console.print(f"[bold blue]{label}[/bold blue]")
         for i, choice in enumerate(choices, start=1):
             marker = "●" if choice == current else "○"
-            self.console.print(f"  [{i}] {marker} {choice}")
+            show = display_labels.get(choice, choice) if display_labels else choice
+            self.console.print(f"  [{i}] {marker} {show}")
         footer = "Type number"
         if allow_back:
             footer += ", b=Back"
@@ -212,16 +243,24 @@ class InlinePromptUI:
 
     def _run_step(self, step: str, *, allow_back: bool) -> str:
         if step == "action":
+            if self.state.action not in ACTION_CHOICES:
+                self.state.action = ACTION_CHOICES[0]
             value, signal = self._ask_choice("Action", ACTION_CHOICES, self.state.action, allow_back=allow_back)
             if signal:
                 return signal
             self.state.action = str(value)
-            if self.state.action not in {"Play", "Play (Demo Win)"}:
+            if self.state.action != "Play":
                 self._clear_horse_quote_state()
             return "next"
 
         if step == "game":
-            value, signal = self._ask_choice("Game", GAME_CHOICES, self.state.game, allow_back=allow_back)
+            value, signal = self._ask_choice(
+                "Game",
+                GAME_CHOICES,
+                self.state.game,
+                allow_back=allow_back,
+                display_labels=GAME_LABELS,
+            )
             if signal:
                 return signal
             self.state.game = str(value)
@@ -248,14 +287,32 @@ class InlinePromptUI:
                 if signal:
                     return signal
                 self.state.amount = str(value)
+                try:
+                    amount = Decimal(self.state.amount)
+                except Exception:
+                    self.console.print("[red]Invalid amount. Use a number like 10 or 20.50.[/red]")
+                    return "stay"
+                if amount < MIN_BILLING_USD or amount > MAX_BILLING_USD:
+                    self.console.print(
+                        f"[red]Amount must be between ${MIN_BILLING_USD:.2f} and ${MAX_BILLING_USD:.2f}. Try again.[/red]"
+                    )
+                    return "stay"
                 return "next"
 
-            if self.state.action in {"Play", "Play (Demo Win)"}:
+            if self.state.action == "Play":
                 amount_label = "Budget cap ($V)" if self.state.game == "horse" else "Stake ($V)"
                 value, signal = self._ask_input(amount_label, default=self.state.amount, allow_back=allow_back)
                 if signal:
                     return signal
                 self.state.amount = str(value)
+                try:
+                    stake = Decimal(self.state.amount)
+                except Exception:
+                    self.console.print("[red]Invalid stake. Use a number like 50 or 125.5.[/red]")
+                    return "stay"
+                if stake < min_game_wager_v():
+                    self.console.print(f"[red]Stake must be at least {min_game_wager_v():.2f} $V. Try again.[/red]")
+                    return "stay"
                 if self.state.game == "horse":
                     quote = asyncio.run(self._fetch_horse_quote())
                     if quote is None:
@@ -275,7 +332,7 @@ class InlinePromptUI:
                     self.state.horse_quote_selected = selected
                 return "next"
 
-            if self.state.action in {"Verify", "Verify (Demo)"}:
+            if self.state.action == "Verify":
                 value, signal = self._ask_input("Game ID", default=self.state.game_id, allow_back=allow_back)
                 if signal:
                     return signal
@@ -300,8 +357,8 @@ class InlinePromptUI:
 
     def _print_review(self) -> None:
         lines = [f"Action: {self.state.action}"]
-        if self.state.action in {"Play", "Play (Demo Win)"}:
-            lines.append(f"Game: {self.state.game}")
+        if self.state.action == "Play":
+            lines.append(f"Game: {GAME_LABELS.get(self.state.game, self.state.game)}")
             if self.state.game == "horse":
                 selected = self.state.horse_quote_selected or self._selected_horse_row() or {}
                 lines.append(f"Bet type: {self.state.bet_type}")
@@ -319,7 +376,7 @@ class InlinePromptUI:
                 lines.append(f"Stake: {self.state.amount}")
         elif self.state.action == "Deposit":
             lines.append(f"Amount: {self.state.amount}")
-        elif self.state.action in {"Verify", "Verify (Demo)"}:
+        elif self.state.action == "Verify":
             lines.append(f"Game ID: {self.state.game_id}")
         self.console.print(Panel("\n".join(lines), title="Review"))
 
@@ -445,15 +502,35 @@ class InlinePromptUI:
                 f"Result: {outcome.get('result')}"
             )
         if game_code == "poker":
+            player_cards = list(outcome.get("player_cards", []) or [])
+            dealer_cards = list(outcome.get("dealer_cards", []) or [])
+            community_cards = list(outcome.get("community_cards", []) or [])
+            result = str(outcome.get("result", ""))
+            player_rank = str(outcome.get("player_rank", ""))
+            dealer_rank = str(outcome.get("dealer_rank", ""))
             return (
-                f"{render_hand(outcome.get('hand', []), label='FINAL HAND')}\n"
-                f"Rank: {outcome.get('rank')}"
+                f"{render_hand(player_cards, label='PLAYER')}\n"
+                f"{render_hand(dealer_cards, label='DEALER')}\n"
+                f"{render_hand(community_cards, label='BOARD')}\n"
+                f"Ranks: PLAYER={player_rank} | DEALER={dealer_rank}\n"
+                f"Result: {result}"
             )
         if game_code == "baccarat":
+            player_total = outcome.get("player_total")
+            banker_total = outcome.get("banker_total")
+            bet_side = str(outcome.get("bet_type", "")).replace("bet_", "").upper() or "N/A"
+            result = str(outcome.get("result", ""))
+            winner = "PLAYER" if "player" in result else "BANKER" if "banker" in result else "TIE"
+            verdict = "WIN" if (
+                (bet_side == "PLAYER" and winner == "PLAYER")
+                or (bet_side == "BANKER" and winner == "BANKER")
+                or (bet_side == "TIE" and winner == "TIE")
+            ) else "LOSS"
             return (
                 f"{render_hand(outcome.get('player_cards', []), label='PLAYER', value=outcome.get('player_total'))}\n"
                 f"{render_hand(outcome.get('banker_cards', []), label='BANKER', value=outcome.get('banker_total'))}\n"
-                f"Result: {outcome.get('result')}"
+                f"Totals: PLAYER={player_total} | BANKER={banker_total}\n"
+                f"Your bet: {bet_side} | Winner: {winner} | {verdict}"
             )
         if game_code == "roulette":
             payout_mult = "0"
@@ -469,15 +546,108 @@ class InlinePromptUI:
             return render_slots_reels(outcome.get("reels", []), bool(outcome.get("hit", False)))
         return json.dumps(outcome, indent=2)
 
+    @staticmethod
+    def _state_cards_to_strings(raw_cards: Any) -> list[str]:
+        out: list[str] = []
+        if not isinstance(raw_cards, list):
+            return out
+        for item in raw_cards:
+            if isinstance(item, list) and len(item) >= 2:
+                out.append(f"{item[0]}{item[1]}")
+            elif isinstance(item, tuple) and len(item) >= 2:
+                out.append(f"{item[0]}{item[1]}")
+            elif isinstance(item, str) and item:
+                out.append(item)
+        return out
+
+    def _render_round_state(self, game_code: str, state: dict, current_state: str) -> str:
+        if not isinstance(state, dict):
+            return ""
+        if game_code == "blackjack":
+            from openvegas.casino.blackjack import hand_value
+
+            player_cards = self._state_cards_to_strings(state.get("player", []))
+            dealer_cards = self._state_cards_to_strings(state.get("dealer", []))
+            if current_state != "resolvable" and len(dealer_cards) >= 2:
+                dealer_cards = [dealer_cards[0], HIDDEN_CARD_TOKEN]
+            player_total = None
+            if player_cards:
+                try:
+                    player_total = hand_value([tuple(c) for c in (state.get("player", []) or [])])
+                except Exception:
+                    player_total = None
+            return (
+                f"{render_hand(player_cards, label='PLAYER', value=player_total)}\n"
+                f"{render_hand(dealer_cards, label='DEALER')}"
+            )
+        if game_code == "poker":
+            player_cards = self._state_cards_to_strings(state.get("player", []))
+            community_cards = self._state_cards_to_strings(state.get("community", []))
+            return (
+                f"{render_hand(player_cards, label='PLAYER')}\n"
+                f"{render_hand(community_cards, label='BOARD')}"
+            )
+        if game_code == "baccarat":
+            player_cards = self._state_cards_to_strings(state.get("player", []))
+            banker_cards = self._state_cards_to_strings(state.get("banker", []))
+            player_total = state.get("player_total")
+            banker_total = state.get("banker_total")
+            return (
+                f"{render_hand(player_cards, label='PLAYER', value=player_total)}\n"
+                f"{render_hand(banker_cards, label='BANKER', value=banker_total)}\n"
+                f"Totals: PLAYER={player_total if player_total is not None else '-'} | BANKER={banker_total if banker_total is not None else '-'}"
+            )
+        if game_code == "roulette":
+            bet_type = str(state.get("bet_type") or "none")
+            _ = current_state
+            return f"Bet selected: {bet_type.replace('bet_', '').upper() if bet_type != 'none' else 'NONE'}"
+        if game_code == "slots":
+            return "Ready to spin."
+        return ""
+
+    async def _animate_resolve(self, game_code: str) -> None:
+        if not bool(load_config().get("animation", True)):
+            return
+        delay = 0.8 if game_code in {"roulette", "slots"} else 0.45
+        with self.console.status(f"Resolving {game_code}...", spinner="dots"):
+            await asyncio.sleep(delay)
+
+    async def _animate_game_phase(self, game_code: str) -> None:
+        if not bool(load_config().get("animation", True)):
+            return
+        if game_code == "roulette":
+            message = "Submitting spin..."
+        elif game_code == "slots":
+            message = "Spinning reels..."
+        else:
+            message = f"Running {game_code}..."
+        with self.console.status(message, spinner="line"):
+            await asyncio.sleep(0.45)
+
     def _choose_round_action(self, game_code: str, valid_actions: list[str], state: dict) -> tuple[str, dict] | None:
         self.console.print("[bold yellow]Round started: actions cannot be undone.[/bold yellow]")
         if not valid_actions:
             return None
-        if game_code == "poker" and "hold" in valid_actions:
-            self.console.print("[dim]Actions: hold, stand[/dim]")
+        if game_code == "poker" and {"call", "fold"}.issubset(set(valid_actions)):
+            self.console.print("[dim]Actions: call (continue) or fold (forfeit hand).[/dim]")
         self.console.print("[bold blue]Choose next action[/bold blue]")
+        action_labels = {
+            "bet_red": "Bet Red",
+            "bet_black": "Bet Black",
+            "bet_odd": "Bet Odd",
+            "bet_even": "Bet Even",
+            "bet_number": "Bet Number",
+            "spin": "Spin",
+            "call": "Call",
+            "fold": "Fold",
+            "hit": "Hit",
+            "stand": "Stand",
+            "bet_player": "Bet Player",
+            "bet_banker": "Bet Banker",
+            "bet_tie": "Bet Tie",
+        }
         for i, act in enumerate(valid_actions, start=1):
-            self.console.print(f"  [{i}] {act}")
+            self.console.print(f"  [{i}] {action_labels.get(act, act)}")
         self.console.print("  [q] quit view")
         picked = Prompt.ask(
             "Action",
@@ -488,13 +658,6 @@ class InlinePromptUI:
             return None
         action = valid_actions[int(picked) - 1]
         payload: dict = {}
-        if game_code == "poker" and action == "hold":
-            pos_raw = Prompt.ask("Hold positions (e.g. 1,3,5 or none)", default="none").strip().lower()
-            if pos_raw != "none" and pos_raw:
-                try:
-                    payload["positions"] = [max(0, int(x.strip()) - 1) for x in pos_raw.split(",") if x.strip()]
-                except Exception:
-                    payload["positions"] = []
         if game_code == "roulette" and action == "bet_number":
             num_raw = Prompt.ask("Pick number 0-36", default="7")
             try:
@@ -504,7 +667,7 @@ class InlinePromptUI:
         _ = state
         return action, payload
 
-    async def _run_human_card_round(self, *, demo_mode: bool, stake: Decimal) -> str:
+    async def _run_human_card_round(self, *, stake: Decimal) -> str:
         session = await self.client.human_casino_start_session(
             max_loss_v=max(Decimal("100"), stake * Decimal("5")),
             max_rounds=100,
@@ -513,26 +676,6 @@ class InlinePromptUI:
         session_id = str(session.get("casino_session_id", ""))
         if not session_id:
             return f"Unable to start casino session: {session}"
-
-        if demo_mode:
-            demo = await self.client.human_casino_demo_autoplay(
-                casino_session_id=session_id,
-                game_code=self.state.game,
-                wager_v=stake,
-                idempotency_key=f"ui-demo-{uuid.uuid4()}",
-            )
-            outcome = demo.get("outcome", {})
-            payout = Decimal(str(demo.get("payout_v", "0")))
-            net = Decimal(str(demo.get("net_v", "0")))
-            self._last_is_win = net > 0
-            visual = self._render_card_outcome(self.state.game, outcome, stake, payout)
-            return (
-                f"{visual}\n"
-                f"DEMO MODE (canonical: false)\n"
-                f"Payout: {payout} | Net: {net}\n"
-                f"Round ID: {demo.get('round_id')}\n"
-                f"Verify (API): /casino/human/rounds/{demo.get('round_id')}/verify"
-            )
 
         started = await self.client.human_casino_start_round(
             casino_session_id=session_id,
@@ -547,6 +690,19 @@ class InlinePromptUI:
         current_state = str(started.get("current_state", "awaiting_action"))
         state = started.get("state", {}) or {}
         valid_actions = list(started.get("valid_actions", []) or [])
+        last_state_text: str | None = None
+
+        def _print_round_state_once(state_text: str) -> None:
+            nonlocal last_state_text
+            if not state_text:
+                return
+            if state_text == last_state_text:
+                return
+            self.console.print(Panel(state_text, title="Round State"))
+            last_state_text = state_text
+
+        state_text = self._render_round_state(self.state.game, state, current_state)
+        _print_round_state_once(state_text)
 
         while True:
             if current_state == "resolvable":
@@ -563,6 +719,13 @@ class InlinePromptUI:
                 outcome = resolved.get("outcome", {})
                 payout = Decimal(str(resolved.get("payout_v", "0")))
                 net = Decimal(str(resolved.get("net_v", "0")))
+                if self.state.game == "roulette" and bool(load_config().get("animation", True)):
+                    try:
+                        await animate_roulette_spin(self.console, result_number=int(outcome.get("result", 0)))
+                    except Exception:
+                        await self._animate_resolve(self.state.game)
+                else:
+                    await self._animate_resolve(self.state.game)
                 self._last_is_win = net > 0
                 visual = self._render_card_outcome(self.state.game, outcome, stake, payout)
                 return (
@@ -572,6 +735,35 @@ class InlinePromptUI:
                     f"Round ID: {round_id}\n"
                     f"Verify (API): /casino/human/rounds/{round_id}/verify"
                 )
+
+            if self.state.game in {"roulette", "slots"} and valid_actions == ["spin"]:
+                await self._animate_game_phase(self.state.game)
+                try:
+                    acted = await self.client.human_casino_action(
+                        round_id=round_id,
+                        action="spin",
+                        payload={},
+                        idempotency_key=f"ui-action-{uuid.uuid4()}",
+                    )
+                except APIError as e:
+                    parsed = self._try_parse_json(str(e.detail))
+                    if parsed:
+                        return (
+                            f"{parsed.get('error')}\n"
+                            f"state={parsed.get('current_state')}\n"
+                            f"valid_actions={parsed.get('valid_actions', [])}"
+                        )
+                    return f"API error {e.status}: {e.detail}"
+                if acted.get("error"):
+                    current_state = str(acted.get("current_state", current_state))
+                    valid_actions = list(acted.get("valid_actions", []) or [])
+                    continue
+                state = acted.get("state", {}) or {}
+                current_state = str(acted.get("current_state", current_state))
+                valid_actions = list(acted.get("valid_actions", []) or [])
+                state_text = self._render_round_state(self.state.game, state, current_state)
+                _print_round_state_once(state_text)
+                continue
 
             selected = self._choose_round_action(self.state.game, valid_actions, state)
             if selected is None:
@@ -606,6 +798,8 @@ class InlinePromptUI:
             state = acted.get("state", {}) or {}
             current_state = str(acted.get("current_state", current_state))
             valid_actions = list(acted.get("valid_actions", []) or [])
+            state_text = self._render_round_state(self.state.game, state, current_state)
+            _print_round_state_once(state_text)
 
     async def _run_action(self) -> str:
         action = self.state.action
@@ -613,33 +807,105 @@ class InlinePromptUI:
 
         if action == "Balance":
             data = await self.client.get_balance()
-            return f"Balance: {data.get('balance', '0')} $V"
+            return f"Balance: {_format_v_amount(data.get('balance', '0'))} $V"
 
         if action == "History":
-            data = await self.client.get_history()
+            data = await self.client.get_billing_activity()
             entries = data.get("entries", [])
             if not entries:
                 return "No transactions yet."
-            return "\n".join(
-                f"{e.get('entry_type')} {e.get('amount')} ref={str(e.get('reference_id',''))[:12]}"
-                for e in entries[:8]
-            )
+            lines: list[str] = []
+            for e in entries[:8]:
+                kind = str(e.get("type") or e.get("entry_type") or "")
+                status = str(e.get("status") or "")
+                if kind == "gameplay":
+                    amount = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
+                    amount_label = f"{amount} $V"
+                else:
+                    usd = str(e.get("amount_usd") or "0.00")
+                    amount_v = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
+                    amount_label = f"${usd} · +{amount_v} $V"
+                lines.append(
+                    f"{kind} {amount_label} {status} ref={str(e.get('reference_id', ''))[:12]}".strip()
+                )
+            return "\n".join(lines)
 
         if action == "Deposit":
             data = await self.client.create_topup_checkout(Decimal(self.state.amount))
+            checkout_url = str(data.get("checkout_url") or "")
+            topup_id = str(data.get("topup_id") or "").strip()
+            status_page = f"/ui/topup/{topup_id}" if topup_id else ""
+            status_page_url = (
+                f"{str(self.client.base_url).rstrip('/')}{status_page}"
+                if status_page
+                else ""
+            )
+            compact_topup = encode_compact_uuid(topup_id) if topup_id else None
+            qr_status_short_url = (
+                f"{str(self.client.base_url).rstrip('/')}/r/{compact_topup}"
+                if compact_topup
+                else ""
+            )
+            target_url = checkout_url
+            auto_open_message = "Checkout URL not available."
+            if checkout_url:
+                if _is_simulated_checkout_url(checkout_url):
+                    target_url = f"{str(self.client.base_url).rstrip('/')}/ui/payments"
+                try:
+                    opened = webbrowser.open(target_url, new=2)
+                except Exception:
+                    opened = False
+                auto_open_message = (
+                    f"Opened browser: {target_url}"
+                    if opened
+                    else f"Open manually: {target_url}"
+                )
+                if _is_simulated_checkout_url(checkout_url):
+                    auto_open_message += " (simulated checkout URL detected)"
+            qr_block = ""
+            # Use short redirect URL to reduce QR payload and printed size in terminal.
+            qr_value = qr_status_short_url or status_page_url or checkout_url
+            if qr_value:
+                try:
+                    border = 0
+                    width = qr_width(qr_value, border=border)
+                    if width + 4 > self.console.width:
+                        qr_value = status_page_url or checkout_url
+                        width = qr_width(qr_value, border=0)
+                    qr_block = "\nScan QR:\n" + "\n".join(
+                        f"  {line}" for line in qr_half_block(qr_value, border=0).splitlines()
+                    )
+                except Exception as exc:
+                    detail = str(exc).strip().replace("\n", " ")
+                    if len(detail) > 180:
+                        detail = detail[:180]
+                    qr_block = (
+                        "\nQR unavailable in this runtime "
+                        f"({detail or 'missing dependency `qrcode[pil]`'})."
+                    )
             return (
-                f"Top-up ID: {data.get('topup_id')}\n"
+                f"Top-up ID: {topup_id}\n"
                 f"Status: {data.get('status')}\n"
-                f"Checkout URL: {data.get('checkout_url')}"
+                f"Checkout URL: {checkout_url}\n"
+                f"{auto_open_message}\n"
+                f"Status page: {status_page}{qr_block}"
             )
 
-        if action in {"Play", "Play (Demo Win)"}:
+        if action == "Play":
             stake = Decimal(self.state.amount)
+            balance_before = ""
+            try:
+                bal = await self.client.get_balance()
+                balance_before = _format_v_amount(bal.get("balance", "0"))
+            except Exception:
+                balance_before = ""
             if self.state.game in CARD_GAME_CHOICES:
-                return await self._run_human_card_round(
-                    demo_mode=(action == "Play (Demo Win)"),
+                out = await self._run_human_card_round(
                     stake=stake,
                 )
+                if balance_before:
+                    return f"Balance before play: {balance_before} $V\n{out}"
+                return out
             if self.state.game == "horse":
                 selected = self.state.horse_quote_selected or self._selected_horse_row()
                 if not self.state.horse_quote_id:
@@ -654,7 +920,7 @@ class InlinePromptUI:
                         quote_id=self.state.horse_quote_id,
                         horse=int(self.state.horse),
                         idempotency_key=f"ui-horse-play-{uuid.uuid4()}",
-                        demo_mode=(action == "Play (Demo Win)"),
+                        demo_mode=False,
                     )
                 except APIError as e:
                     payload = self._try_parse_json(str(e.detail))
@@ -673,10 +939,18 @@ class InlinePromptUI:
                     raise
             else:
                 payload: dict = {"amount": float(stake)}
-                if action == "Play (Demo Win)":
-                    data = await self.client.play_game_demo(self.state.game, payload)
-                else:
-                    data = await self.client.play_game(self.state.game, payload)
+                if self.state.game == "skillshot" and not self.render_options.no_render:
+                    self.console.print(
+                        "[dim]Skillshot: press Enter to lock your stop point. "
+                        "Gold pays highest, green pays standard.[/dim]"
+                    )
+                    try:
+                        stop_position = await SkillShotGame().render_interactive(self.console)
+                        payload["stop_position"] = max(0, min(SkillShotGame.BAR_WIDTH - 1, int(stop_position)))
+                    except Exception:
+                        # Fallback to deterministic center stop if interactive render is unavailable.
+                        payload["stop_position"] = SkillShotGame.BAR_WIDTH // 2
+                data = await self.client.play_game(self.state.game, payload)
 
             gr = self._to_game_result(data, stake)
             renderer = self._renderer_for()
@@ -692,22 +966,15 @@ class InlinePromptUI:
             if Decimal(str(data.get("net", "0"))) > 0:
                 self._last_is_win = True
 
-            mode = "DEMO MODE (canonical: false)" if data.get("demo_mode") else "LIVE MODE"
-            return (
-                f"{render_note}{mode}\n"
+            prefix = f"Balance before play: {balance_before} $V\n" if balance_before else ""
+            return prefix + (
+                f"{render_note}LIVE MODE\n"
                 f"Payout: {data.get('payout')} | Net: {data.get('net')}\n"
                 f"Game ID: {data.get('game_id')}\n"
-                f"Verify: {verify_hint_for_result(str(data.get('game_id', '')), bool(data.get('demo_mode')))}"
+                f"Verify: {verify_hint_for_result(str(data.get('game_id', '')), False)}"
             )
 
-        if action in {"Verify", "Verify (Demo)"}:
-            if action == "Verify (Demo)":
-                data = await self.client.verify_demo_game(self.state.game_id)
-                return (
-                    "DEMO VERIFY\n"
-                    f"canonical: {data.get('canonical')}\n"
-                    f"server_seed_hash: {str(data.get('server_seed_hash', ''))[:20]}..."
-                )
+        if action == "Verify":
             data = await self.client.verify_game(self.state.game_id)
             return (
                 "Outcome verified payload received.\n"

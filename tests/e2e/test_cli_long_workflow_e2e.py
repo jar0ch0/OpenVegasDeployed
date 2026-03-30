@@ -5,9 +5,10 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from openvegas.cli import cli
-from openvegas.telemetry import get_dashboard_slices, reset_metrics
+from openvegas.telemetry import get_dashboard_slices, get_metrics_snapshot, reset_metrics
 from openvegas.agent.local_tools import ToolExecutionResult
 from openvegas.tui.diff_reviewer import parse_unified_patch
+from openvegas.tui.approval_menu import ApprovalDecision
 
 
 LONG_WORKFLOW_PROMPT = """You are my ML platform engineer. Execute this as one continuous workflow with tools, not advice:
@@ -408,6 +409,513 @@ class _FakeChatClientMassDummyFlow(_FakeChatClient):
         }
 
 
+class _FakeChatClientReadThenCodeOnly(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        if self._ask_step == 2:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Here is the modified file:\n\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        return {"thread_id": self.thread_id, "text": "Applied.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientReadThenCodeNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        if self._ask_step == 2:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Here is the modified file:\n\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [],
+            }
+        return {"thread_id": self.thread_id, "text": "Applied.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientReadThenMultipleCodeBlocks(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        if self._ask_step == 2:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Apply this update:\n\n"
+                    "```text\n"
+                    "usage: run divide(4,2)\n"
+                    "```\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [],
+            }
+        return {"thread_id": self.thread_id, "text": "Applied.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientReadThenCodeNoToolsGuardFinalize(_FakeChatClientReadThenCodeNoTools):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            # If finalize is called before synth-write has executed a patch, signal failure.
+            if not any(str(r.get("tool_name")) == "fs_apply_patch" for r in self._requests.values()):
+                return {
+                    "thread_id": self.thread_id,
+                    "text": "PREMATURE_FINALIZE_BEFORE_SYNTH_WRITE",
+                    "v_cost": "0.0",
+                }
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+        return await super().ask(prompt, _provider, _model, **kwargs)
+
+
+class _FakeChatClientReadDuplicateThenCodeNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            # If finalize is called before synth-write patch path runs, fail test visibly.
+            if not any(str(r.get("tool_name")) == "fs_apply_patch" for r in self._requests.values()):
+                return {
+                    "thread_id": self.thread_id,
+                    "text": "PREMATURE_FINALIZE_AFTER_DUPLICATE_READ",
+                    "v_cost": "0.0",
+                }
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        if self._ask_step == 2:
+            # Duplicate read-only turn; should not finalize as completed.
+            return {
+                "thread_id": self.thread_id,
+                "text": "Checked current file contents.",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        if self._ask_step == 3:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Here is the modified file:\n\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [],
+            }
+        return {"thread_id": self.thread_id, "text": "Applied.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientCodeOnlyNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Here is the modified file:\n\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [],
+            }
+        return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientUnfencedCodeNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    return a + b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [],
+            }
+        return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0", "tool_calls": []}
+
+
+class _FakeChatClientFinalizeCodeBlockNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            if not any(str(r.get("tool_name")) == "fs_apply_patch" for r in self._requests.values()):
+                return {
+                    "thread_id": self.thread_id,
+                    "text": (
+                        "FINALIZE_CODE_BLOCK_SENTINEL\n\n"
+                        "```python\n"
+                        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                        "def add(a: float, b: float) -> float:\n"
+                        "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                        "    return a + b\n\n"
+                        "def sub(a: float, b: float) -> float:\n"
+                        "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                        "    return a - b\n\n"
+                        "def mul(a: float, b: float) -> float:\n"
+                        "    \"\"\"Return the product of a and b.\"\"\"\n"
+                        "    return a * b\n\n"
+                        "def divide(a: float, b: float) -> float:\n"
+                        "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                        "    if b == 0:\n"
+                        "        raise ValueError(\"Cannot divide by zero.\")\n"
+                        "    return a / b\n"
+                        "```\n"
+                    ),
+                    "v_cost": "0.0",
+                }
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        return {
+            "thread_id": self.thread_id,
+            "text": "Checked current file state.",
+            "v_cost": "0.0",
+            "tool_calls": [],
+        }
+
+
+class _FakeChatClientFinalizeMultipleCodeBlocksNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            if not any(str(r.get("tool_name")) == "fs_apply_patch" for r in self._requests.values()):
+                block = (
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    return a + b\n"
+                )
+                return {
+                    "thread_id": self.thread_id,
+                    "text": (
+                        "Two options:\n\n"
+                        f"```python\n{block}```\n\n"
+                        f"```python\n{block}```\n"
+                    ),
+                    "v_cost": "0.0",
+                }
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        return {
+            "thread_id": self.thread_id,
+            "text": "Checked current file state.",
+            "v_cost": "0.0",
+            "tool_calls": [],
+        }
+
+
+class _FakeChatClientFinalizeNoCodeBlockNoTools(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            if not any(str(r.get("tool_name")) == "fs_apply_patch" for r in self._requests.values()):
+                return {
+                    "thread_id": self.thread_id,
+                    "text": "I would add divide() and a zero-division guard, but no fenced code block is provided here.",
+                    "v_cost": "0.0",
+                }
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": "",
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    }
+                ],
+            }
+        return {
+            "thread_id": self.thread_id,
+            "text": "Checked current file state.",
+            "v_cost": "0.0",
+            "tool_calls": [],
+        }
+
+
+class _FakeChatClientReadThenCodeNoToolsPromptLog(_FakeChatClientReadThenCodeNoTools):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompt_log: list[str] = []
+
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        self.prompt_log.append(str(prompt or ""))
+        return await super().ask(prompt, _provider, _model, **kwargs)
+
+
+class _FakeChatClientReadThenCodeNoToolsBridgeUnavailable(_FakeChatClientReadThenCodeNoToolsPromptLog):
+    async def ide_get_context(self, **_kwargs):
+        return {"active_file": "tests/fixtures/diff_accept_demo/calc.py"}
+
+
+class _FakeChatClientReadThenCodeNoToolsMalformedDiff(_FakeChatClientReadThenCodeNoToolsPromptLog):
+    async def ide_get_context(self, **_kwargs):
+        return {"active_file": "tests/fixtures/diff_accept_demo/calc.py"}
+
+    async def ide_message(self, **_kwargs):
+        # malformed: hunks_total does not match decision count
+        return {
+            "result": {
+                "file_path": "tests/fixtures/diff_accept_demo/calc.py",
+                "hunks_total": 2,
+                "decisions": [{"hunk_index": 0, "decision": "accepted"}],
+                "all_accepted": False,
+                "timed_out": False,
+            }
+        }
+
+
+class _FakeChatClientInvalidWritePlusReadThenCode(_FakeChatClient):
+    async def ask(self, prompt, _provider, _model, **kwargs):
+        _ = prompt
+        enable_tools = bool(kwargs.get("enable_tools", False))
+        if not enable_tools:
+            return {"thread_id": self.thread_id, "text": "Done.", "v_cost": "0.0"}
+
+        self._ask_step += 1
+        if self._ask_step == 1:
+            return {
+                "thread_id": self.thread_id,
+                "text": (
+                    "Here's the updated version:\n\n"
+                    "```python\n"
+                    "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+                    "def add(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the sum of a and b.\"\"\"\n"
+                    "    return a + b\n\n"
+                    "def sub(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the difference of a and b.\"\"\"\n"
+                    "    return a - b\n\n"
+                    "def mul(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the product of a and b.\"\"\"\n"
+                    "    return a * b\n\n"
+                    "def divide(a: float, b: float) -> float:\n"
+                    "    \"\"\"Return the quotient of a and b with guard.\"\"\"\n"
+                    "    if b == 0:\n"
+                    "        raise ValueError(\"Cannot divide by zero.\")\n"
+                    "    return a / b\n"
+                    "```\n"
+                ),
+                "v_cost": "0.0",
+                "tool_calls": [
+                    {"tool_name": "Write", "arguments": {"filepath": ""}},
+                    {
+                        "tool_name": "Read",
+                        "arguments": {"filepath": "tests/fixtures/diff_accept_demo/calc.py"},
+                    },
+                ],
+            }
+        return {"thread_id": self.thread_id, "text": "Applied.", "v_cost": "0.0", "tool_calls": []}
+
+
 def test_chat_long_ml_workflow_prompt_end_to_end(monkeypatch, tmp_path: Path):
     reset_metrics()
     _FakeChatClient.instances.clear()
@@ -594,3 +1102,1088 @@ def test_chat_mass_dummy_code_changes_end_to_end_real_patch(monkeypatch, tmp_pat
 
     slices = get_dashboard_slices()
     assert slices["tool_apply_patch_same_intent_fail_total"] == 0
+
+
+def test_chat_synthesizes_write_when_model_only_returns_code_block(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeOnly)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "tool_execution_failed" not in result.output, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+    assert "\"\"\"Return the sum of a and b.\"\"\"" in text
+
+
+def test_chat_synthesizes_write_after_read_only_then_zero_tool_calls(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "tool_execution_failed" not in result.output, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_read" for r in reqs), result.output
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+
+
+def test_chat_synthesizes_write_with_observation_target_fallback(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Add divide(), zero-division guard, and docstrings to this file.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+
+
+def test_chat_synthesizes_write_with_multiple_code_blocks(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenMultipleCodeBlocks)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+
+
+def test_synth_write_fires_before_empty_list_finalization(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoToolsGuardFinalize)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "PREMATURE_FINALIZE_BEFORE_SYNTH_WRITE" not in result.output, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_read" for r in reqs), result.output
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+
+
+def test_duplicate_read_does_not_premature_finalize_before_mutation(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadDuplicateThenCodeNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "PREMATURE_FINALIZE_AFTER_DUPLICATE_READ" not in result.output, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+
+
+def test_post_finalize_intercepts_code_block_and_mutates(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeCodeBlockNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "FINALIZE_CODE_BLOCK_SENTINEL" not in result.output, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_synth_write_from_code_block_total|reason=post_finalize_interception", 0) >= 1
+
+
+def test_post_finalize_interception_single_attempt_no_loop(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeCodeBlockNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "edit blocked: post_finalize_intercept_already_attempted" not in result.output, result.output
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_synth_write_from_code_block_total|reason=post_finalize_interception", 0) == 1
+
+
+def test_post_finalize_two_fenced_blocks_blocks_without_mutation(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeMultipleCodeBlocksNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "edit blocked: multiple_code_blocks_ambiguous" in result.output, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    assert target.read_text(encoding="utf-8") == original
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_mutation_blocked_total|reason=multiple_code_blocks_ambiguous", 0) >= 1
+    assert snapshot.get("tool_loop_finalize_reason|reason=mutation_required_but_unavailable", 0) >= 1
+
+
+def test_post_finalize_interception_blocks_hard_when_no_code_block(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeNoCodeBlockNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "edit blocked: zero_code_blocks" in result.output, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    assert target.read_text(encoding="utf-8") == original
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_mutation_blocked_total|reason=zero_code_blocks", 0) >= 1
+    assert snapshot.get("tool_loop_finalize_reason|reason=mutation_required_but_unavailable", 0) >= 1
+
+
+def test_post_finalize_reports_non_tty_block_reason_instead_of_attempted(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeCodeBlockNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    # Force non-tty diff rejection even in test runner.
+    monkeypatch.setattr(
+        "openvegas.cli.review_patch_terminal",
+        lambda **_kwargs: {
+            "file_path": "tests/fixtures/diff_accept_demo/calc.py",
+            "hunks_total": 1,
+            "decisions": [{"hunk_index": 0, "decision": "rejected"}],
+            "all_accepted": False,
+            "timed_out": False,
+            "error": "non_tty",
+        },
+    )
+
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "edit blocked: non_interactive_terminal" in result.output, result.output
+    assert "edit blocked: post_finalize_intercept_already_attempted" not in result.output, result.output
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_blocked_intercept_outcome_emits_finalize_reason_metric(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientFinalizeMultipleCodeBlocksNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "2")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert "edit blocked: multiple_code_blocks_ambiguous" in result.output, result.output
+    assert target.read_text(encoding="utf-8") == original
+
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_loop_finalize_reason|reason=mutation_required_but_unavailable", 0) >= 1
+
+
+def test_chat_synthesized_write_still_requires_approval_in_ask_mode(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeOnly)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    approval_calls = {"count": 0}
+
+    def _allow_once_approval(**_kwargs):
+        approval_calls["count"] += 1
+        return ApprovalDecision.ALLOW_ONCE
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    monkeypatch.setattr("openvegas.cli.choose_approval", _allow_once_approval)
+    scripted_inputs = iter(
+        [
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert approval_calls["count"] >= 1, result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+
+
+def test_chat_recovers_when_model_emits_invalid_write_plus_read(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientInvalidWritePlusReadThenCode)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+
+
+def test_chat_synth_write_triggers_on_zero_tool_calls_with_code_block(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientCodeOnlyNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    terminal_diff_invocations = {"count": 0}
+
+    def _accept_all_terminal_diff(*, path: str, patch_text: str, **_kwargs):
+        terminal_diff_invocations["count"] += 1
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "accepted"} for idx in range(parsed.hunks_total)],
+            "all_accepted": True,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _accept_all_terminal_diff)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert terminal_diff_invocations["count"] >= 1, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    text = target.read_text(encoding="utf-8")
+    assert "def divide(" in text
+    assert "Cannot divide by zero." in text
+
+
+def test_chat_non_edit_prompt_with_fenced_code_does_not_synthesize_mutation(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeOnly)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Show an example implementation for tests/fixtures/diff_accept_demo/calc.py, but do not edit files.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    assert _FakeChatClient.instances, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_chat_edit_prompt_with_unfenced_code_surfaces_block_reason(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientUnfencedCodeNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "4")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = (
+        "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+        "def add(a: float, b: float) -> float:\n"
+        "    return a + b\n\n"
+        "def sub(a: float, b: float) -> float:\n"
+        "    return a - b\n\n"
+        "def mul(a: float, b: float) -> float:\n"
+        "    return a * b\n"
+    )
+    target.write_text(original, encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Edit tests/fixtures/diff_accept_demo/calc.py and add divide() with guard.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    assert target.read_text(encoding="utf-8") == original
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_mutation_blocked_total|reason=zero_code_blocks", 0) >= 1
+
+
+def test_chat_multifile_edit_without_mutating_tool_emits_block_reason(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientCodeOnlyNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "4")
+
+    a_file = tmp_path / "a.py"
+    b_file = tmp_path / "b.py"
+    a_file.write_text("x = 1\n", encoding="utf-8")
+    b_file.write_text("y = 1\n", encoding="utf-8")
+
+    scripted_inputs = iter(
+        [
+            "Edit a.py and b.py: add divide() and docstrings.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_mutation_blocked_total|reason=multiple_targets", 0) >= 1
+
+
+def test_chat_prepare_stage_block_terminates_with_synth_prepare_blocked(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientCodeOnlyNoTools)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "4")
+
+    scripted_inputs = iter(
+        [
+            "Edit /etc/hosts and add divide() with guard.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    reqs = list(_FakeChatClient.instances[-1]._requests.values())
+    assert not any(str(r.get("tool_name")) == "fs_apply_patch" for r in reqs), result.output
+    snapshot = get_metrics_snapshot()
+    assert snapshot.get("tool_synth_write_blocked_total|reason=workspace_path_out_of_bounds", 0) >= 1
+    assert snapshot.get("preprocess_rejected_synth_write|reason=workspace_path_out_of_bounds", 0) >= 1
+
+
+def test_chat_surfaces_non_interactive_terminal_diff_block_reason(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoToolsPromptLog)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _reject_non_tty(*, path: str, patch_text: str, **_kwargs):
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "rejected"} for idx in range(parsed.hunks_total)],
+            "all_accepted": False,
+            "timed_out": False,
+            "error": "non_tty",
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _reject_non_tty)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    inst = _FakeChatClient.instances[-1]
+    assert any("edit blocked: non_interactive_terminal" in p for p in getattr(inst, "prompt_log", [])), result.output
+
+
+def test_chat_surfaces_ide_bridge_unavailable_block_reason(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoToolsBridgeUnavailable)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _reject_generic(*, path: str, patch_text: str, **_kwargs):
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "rejected"} for idx in range(parsed.hunks_total)],
+            "all_accepted": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _reject_generic)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    inst = _FakeChatClient.instances[-1]
+    assert any("edit blocked: ide_bridge_unavailable" in p for p in getattr(inst, "prompt_log", [])), result.output
+
+
+def test_chat_surfaces_malformed_diff_payload_block_reason(monkeypatch, tmp_path: Path):
+    reset_metrics()
+    _FakeChatClient.instances.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openvegas.client.OpenVegasClient", _FakeChatClientReadThenCodeNoToolsMalformedDiff)
+    monkeypatch.setattr("openvegas.cli.load_config", lambda: {})
+    monkeypatch.setenv("OPENVEGAS_TERMINAL_DIFF_FALLBACK", "1")
+
+    target = tmp_path / "tests" / "fixtures" / "diff_accept_demo" / "calc.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        (
+            "\"\"\"Dummy fixture for terminal diff accept/reject testing.\"\"\"\n\n"
+            "def add(a: float, b: float) -> float:\n"
+            "    return a + b\n\n"
+            "def sub(a: float, b: float) -> float:\n"
+            "    return a - b\n\n"
+            "def mul(a: float, b: float) -> float:\n"
+            "    return a * b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def _reject_generic(*, path: str, patch_text: str, **_kwargs):
+        parsed = parse_unified_patch(patch_text)
+        return {
+            "file_path": path,
+            "hunks_total": parsed.hunks_total,
+            "decisions": [{"hunk_index": idx, "decision": "rejected"} for idx in range(parsed.hunks_total)],
+            "all_accepted": False,
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr("openvegas.cli.review_patch_terminal", _reject_generic)
+    scripted_inputs = iter(
+        [
+            "/approve allow",
+            "Edit tests/fixtures/diff_accept_demo/calc.py: add divide(), add zero-division guard, and add docstrings to all functions.",
+            "/exit",
+        ]
+    )
+    monkeypatch.setattr("openvegas.cli.Prompt.ask", lambda *_args, **_kwargs: next(scripted_inputs))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["chat"])
+    assert result.exit_code == 0, result.output
+    inst = _FakeChatClient.instances[-1]
+    assert any("edit blocked: malformed_diff_payload" in p for p in getattr(inst, "prompt_log", [])), result.output

@@ -22,8 +22,25 @@ class TopupCheckoutRequest(BaseModel):
     idempotency_key: str | None = None
 
 
+class TopupPreviewRequest(BaseModel):
+    amount_usd: str
+
+
+class UserSubscriptionCheckoutRequest(BaseModel):
+    monthly_amount_usd: str
+    idempotency_key: str | None = None
+
+
+class ContinuationClaimRequest(BaseModel):
+    idempotency_key: str | None = None
+
+
 class PortalSessionRequest(BaseModel):
     flow_type: Literal["subscription_cancel", "payment_method_update"] | None = None
+
+
+class QRRenderRequest(BaseModel):
+    value: str
 
 
 class TopupSuggestRequest(BaseModel):
@@ -32,6 +49,13 @@ class TopupSuggestRequest(BaseModel):
 
 class FakeCompleteRequest(BaseModel):
     topup_id: str
+
+
+def _require_valid_topup_id(raw: str) -> str:
+    try:
+        return str(uuid.UUID(str(raw)))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid topup_id")
 
 
 async def require_org_admin(org_id: str, user_id: str) -> None:
@@ -72,6 +96,46 @@ async def create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/topups/preview")
+async def preview_topup_checkout(req: TopupPreviewRequest, user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        amount = Decimal(req.amount_usd)
+    except (InvalidOperation, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid amount_usd")
+    try:
+        return await svc.preview_topup_checkout(user_id=user["user_id"], amount_usd=amount)
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/continuation/status")
+async def continuation_status(user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        return await svc.get_continuation_status(user_id=user["user_id"])
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/continuation/claim")
+async def continuation_claim(
+    request: Request,
+    req: ContinuationClaimRequest | None = None,
+    user: dict = Depends(get_current_user),
+):
+    svc = get_billing_service()
+    header_key = str(request.headers.get("Idempotency-Key", "")).strip()
+    body_key = str(req.idempotency_key).strip() if req and req.idempotency_key else ""
+    idem_key = header_key or body_key or None
+    try:
+        return await svc.claim_continuation(user_id=user["user_id"], idempotency_key=idem_key)
+    except IdempotencyConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/topups/suggest")
 async def suggest_topup(req: TopupSuggestRequest | None = None, user: dict = Depends(get_current_user)):
     svc = get_billing_service()
@@ -90,9 +154,28 @@ async def suggest_topup(req: TopupSuggestRequest | None = None, user: dict = Dep
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/topups")
+async def list_topups(user: dict = Depends(get_current_user), limit: int = 50):
+    svc = get_billing_service()
+    try:
+        return await svc.list_topup_history(user_id=user["user_id"], limit=limit)
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/activity")
+async def list_activity(user: dict = Depends(get_current_user), limit: int = 50):
+    svc = get_billing_service()
+    try:
+        return await svc.list_activity_history(user_id=user["user_id"], limit=limit)
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/topups/{topup_id}")
 async def get_topup_status(topup_id: str, user: dict = Depends(get_current_user)):
     svc = get_billing_service()
+    topup_id = _require_valid_topup_id(topup_id)
     try:
         return await svc.get_topup_status(user_id=user["user_id"], topup_id=topup_id)
     except NotFoundError as e:
@@ -102,6 +185,7 @@ async def get_topup_status(topup_id: str, user: dict = Depends(get_current_user)
 @router.get("/topups/{topup_id}/qr.svg")
 async def get_topup_qr_svg(topup_id: str, user: dict = Depends(get_current_user)):
     svc = get_billing_service()
+    topup_id = _require_valid_topup_id(topup_id)
     try:
         payload = await svc.get_topup_qr_svg(user_id=user["user_id"], topup_id=topup_id)
         return Response(
@@ -113,6 +197,20 @@ async def get_topup_qr_svg(topup_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=404, detail=str(e))
     except BillingError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/qr.svg")
+async def render_checkout_qr_svg(req: QRRenderRequest, user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        payload = await svc.render_checkout_qr_svg(value=req.value, surface="ui")
+        return Response(
+            content=payload,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "private, no-store"},
+        )
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/topups/{topup_id}/verify")
@@ -135,8 +233,9 @@ async def fake_complete(req: FakeCompleteRequest, request: Request):
             raise HTTPException(status_code=403, detail="Invalid fake webhook secret")
 
     svc = get_billing_service()
+    topup_id = _require_valid_topup_id(req.topup_id)
     try:
-        topup = await svc.get_topup_internal(topup_id=req.topup_id)
+        topup = await svc.get_topup_internal(topup_id=topup_id)
         topup_mode = ""
         if isinstance(topup, dict):
             topup_mode = str(topup.get("mode") or "")
@@ -144,7 +243,7 @@ async def fake_complete(req: FakeCompleteRequest, request: Request):
             topup_mode = str(getattr(topup, "mode", "") or "")
         if topup_mode != "simulated":
             raise HTTPException(status_code=409, detail="Top-up is not simulated")
-        return await svc.complete_fake_topup(topup_id=req.topup_id)
+        return await svc.complete_fake_topup(topup_id=topup_id)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except BillingError as e:
@@ -159,6 +258,50 @@ async def create_org_subscription_checkout(org_id: str, user: dict = Depends(get
         return await svc.create_org_subscription_checkout(org_id=org_id)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/subscription/checkout")
+async def create_user_subscription_checkout(
+    req: UserSubscriptionCheckoutRequest,
+    user: dict = Depends(get_current_user),
+):
+    svc = get_billing_service()
+    try:
+        amount = Decimal(req.monthly_amount_usd)
+    except (InvalidOperation, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid monthly_amount_usd")
+
+    try:
+        return await svc.create_user_subscription_checkout(
+            user_id=user["user_id"],
+            monthly_amount_usd=amount,
+        )
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/subscription/status")
+async def get_user_subscription_status(user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        return await svc.get_user_subscription_status(user_id=user["user_id"])
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/subscription/portal-session")
+async def create_user_subscription_portal_session(
+    req: PortalSessionRequest | None = None,
+    user: dict = Depends(get_current_user),
+):
+    svc = get_billing_service()
+    try:
+        return await svc.create_user_subscription_portal(
+            user_id=user["user_id"],
+            flow_type=(req.flow_type if req else None),
+        )
     except BillingError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from openvegas.casino.constants import HIDDEN_CARD_TOKEN
 from openvegas.tui.theme import ascii_safe_mode
 
 SUIT_SYMBOLS = {"S": "♠", "H": "♥", "D": "♦", "C": "♣"}
@@ -54,6 +55,9 @@ def render_hand(
 
     rendered = []
     for c in cards:
+        if c == HIDDEN_CARD_TOKEN:
+            rendered.append(render_card("?", "S", ascii_safe, hidden=True))
+            continue
         rank, suit = parse_card_str(c)
         rendered.append(render_card(rank, suit, ascii_safe))
 

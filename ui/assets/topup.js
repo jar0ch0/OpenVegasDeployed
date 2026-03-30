@@ -77,8 +77,16 @@ export async function loadTopup() {
           const svg = await qrRes.text();
           qrImage.hidden = false;
           qrImage.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+          if (svg.includes("QR unavailable in this runtime")) {
+            setState(status, `${data.topup_id} · $${data.amount_usd || "?"} · ${data.mode || "unknown"} · QR fallback rendered (see reason in image)`);
+          }
         } else {
           qrImage.hidden = true;
+          const detail = await qrRes.text().catch(() => "");
+          setState(
+            status,
+            `${data.topup_id} · $${data.amount_usd || "?"} · ${data.mode || "unknown"} · QR fetch failed (${qrRes.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`,
+          );
         }
       } else {
         qrImage.hidden = true;

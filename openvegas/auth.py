@@ -1,12 +1,45 @@
 """Supabase Auth for CLI token issuance and refresh."""
 
-from supabase import create_client, Client
+from __future__ import annotations
 
-from openvegas.config import load_config, save_session, clear_session
+import httpx
+from supabase import Client, create_client
+
+from openvegas.config import clear_session, get_session, load_config, save_session
 
 
 class AuthError(Exception):
     pass
+
+
+class AuthRefreshTimeout(AuthError):
+    pass
+
+
+class AuthRefreshMalformed(AuthError):
+    pass
+
+
+class AuthRefreshRejected(AuthError):
+    pass
+
+
+def _session_expires_at(session: object) -> int:
+    if session is None:
+        return 0
+    raw = getattr(session, "expires_at", None)
+    if raw is not None:
+        try:
+            return int(raw)
+        except Exception:
+            return 0
+    raw_in = getattr(session, "expires_in", None)
+    if raw_in is not None:
+        try:
+            return int(raw_in)
+        except Exception:
+            return 0
+    return 0
 
 
 class SupabaseAuth:
@@ -21,34 +54,58 @@ class SupabaseAuth:
         self.client: Client = create_client(url, key)
 
     def login_with_email(self, email: str, password: str) -> dict:
-        resp = self.client.auth.sign_in_with_password({
-            "email": email,
-            "password": password,
-        })
-        save_session(resp.session.access_token, resp.session.refresh_token)
+        resp = self.client.auth.sign_in_with_password(
+            {
+                "email": email,
+                "password": password,
+            }
+        )
+        if not getattr(resp, "session", None):
+            raise AuthError("Login returned no session.")
+        exp = _session_expires_at(resp.session)
+        save_session(resp.session.access_token, resp.session.refresh_token, access_expires_at=exp)
         return {"user_id": resp.user.id, "email": resp.user.email}
 
     def login_with_otp(self, email: str) -> None:
         self.client.auth.sign_in_with_otp({"email": email})
 
     def signup(self, email: str, password: str) -> dict:
-        resp = self.client.auth.sign_up({
-            "email": email,
-            "password": password,
-        })
+        resp = self.client.auth.sign_up(
+            {
+                "email": email,
+                "password": password,
+            }
+        )
         if resp.session:
-            save_session(resp.session.access_token, resp.session.refresh_token)
+            exp = _session_expires_at(resp.session)
+            save_session(resp.session.access_token, resp.session.refresh_token, access_expires_at=exp)
         return {"user_id": resp.user.id, "email": resp.user.email}
 
     def refresh_token(self) -> str:
-        from openvegas.config import get_session
         session = get_session()
-        refresh = session.get("refresh_token", "")
+        refresh = str(session.get("refresh_token", "")).strip()
         if not refresh:
-            raise AuthError("No refresh token. Please login again.")
-        resp = self.client.auth.refresh_session(refresh)
-        save_session(resp.session.access_token, resp.session.refresh_token)
-        return resp.session.access_token
+            raise AuthRefreshRejected("No refresh token. Please login again.")
+        try:
+            resp = self.client.auth.refresh_session(refresh)
+        except Exception as e:
+            if isinstance(e, (TimeoutError, httpx.TimeoutException)):
+                raise AuthRefreshTimeout("Session refresh timed out.") from e
+            msg = str(e).lower()
+            if any(token in msg for token in ("expired", "invalid", "refresh token", "jwt")):
+                raise AuthRefreshRejected("Session expired. Please login again.") from e
+            raise AuthRefreshRejected(f"Session refresh failed: {e}") from e
+
+        if not getattr(resp, "session", None):
+            raise AuthRefreshMalformed("Refresh response missing session.")
+        access_token = str(getattr(resp.session, "access_token", "") or "").strip()
+        refresh_token = str(getattr(resp.session, "refresh_token", "") or "").strip()
+        if not access_token or not refresh_token:
+            raise AuthRefreshMalformed("Refresh response missing token fields.")
+
+        exp = _session_expires_at(resp.session)
+        save_session(access_token, refresh_token, access_expires_at=exp)
+        return access_token
 
     def logout(self) -> None:
         try:

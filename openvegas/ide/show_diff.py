@@ -150,6 +150,78 @@ def normalize_show_diff_result(
     }
 
 
+def is_valid_show_diff_payload(raw: dict[str, Any] | None) -> bool:
+    payload = raw if isinstance(raw, dict) else {}
+    try:
+        hunks_total = int(payload.get("hunks_total", 0))
+    except Exception:
+        return False
+    if hunks_total < 0:
+        return False
+    timed_out = bool(payload.get("timed_out", False))
+    all_accepted = bool(payload.get("all_accepted", False))
+    decisions = payload.get("decisions", [])
+    if not isinstance(decisions, list):
+        return False
+
+    if hunks_total == 0:
+        # Zero-hunk payload is valid only as explicit no-op shape.
+        return len(decisions) == 0 and timed_out is False and all_accepted is True
+
+    if len(decisions) != hunks_total:
+        return False
+
+    seen: set[int] = set()
+    accepted = 0
+    for idx, d in enumerate(decisions):
+        if not isinstance(d, dict):
+            return False
+        try:
+            hunk_index = int(d.get("hunk_index"))
+        except Exception:
+            return False
+        if hunk_index != idx:
+            return False
+        if hunk_index in seen:
+            return False
+        seen.add(hunk_index)
+        decision = str(d.get("decision") or "").strip().lower()
+        if decision not in {"accepted", "rejected"}:
+            return False
+        if decision == "accepted":
+            accepted += 1
+
+    if all_accepted != (accepted == hunks_total):
+        return False
+    return True
+
+
+def redact_show_diff_payload_shape(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        return {"type": type(raw).__name__}
+    out: dict[str, object] = {}
+    for k in ("file_path", "hunks_total", "all_accepted", "timed_out"):
+        if k in raw:
+            out[k] = raw.get(k)
+    decisions = raw.get("decisions")
+    if isinstance(decisions, list):
+        out["decisions_count"] = len(decisions)
+        indexes: list[object] = []
+        values: list[object] = []
+        for item in decisions[:64]:
+            if isinstance(item, dict):
+                indexes.append(item.get("hunk_index"))
+                values.append(item.get("decision"))
+            else:
+                indexes.append(type(item).__name__)
+        out["decision_indexes"] = indexes
+        out["decision_values"] = values
+    for blocked in ("new_contents", "current_contents", "content", "patch", "diff_text"):
+        if blocked in raw:
+            out[f"{blocked}_stripped"] = True
+    return out
+
+
 def read_text_best_effort(path: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8")

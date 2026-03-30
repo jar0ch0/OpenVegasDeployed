@@ -1,4 +1,4 @@
-"""Billing service for Stripe-backed topups and org sponsorship subscriptions."""
+"""Billing service for Stripe-backed topups and subscriptions (user + org)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from openvegas.qr_runtime import ensure_qrcode_available
 from openvegas.telemetry import emit_metric
 from openvegas.wallet.ledger import WalletService
-from .stripe_gateway import StripeGateway
 
 V_SCALE = Decimal("0.000001")
 USD_SCALE = Decimal("0.01")
@@ -85,6 +85,12 @@ class BillingService:
         return format(Decimal(str(value)).quantize(V_SCALE), "f")
 
     @staticmethod
+    def _fmt_v_2(value: Decimal | str | float | None) -> str | None:
+        if value is None:
+            return None
+        return format(Decimal(str(value)).quantize(USD_SCALE), "f")
+
+    @staticmethod
     def _payment_methods_display() -> list[str]:
         return ["Card", "PayPal", "Apple Pay", "Alipay"]
 
@@ -107,6 +113,71 @@ class BillingService:
     @staticmethod
     def _late_settlement_window_sec() -> int:
         return max(60, int(os.getenv("TOPUP_STRIPE_LATE_SETTLEMENT_WINDOW_SEC", "259200")))
+
+    @staticmethod
+    def _continuation_max_v() -> Decimal:
+        return Decimal(os.getenv("BNPL_CONTINUATION_MAX_V", "50")).quantize(V_SCALE)
+
+    @staticmethod
+    def _continuation_cooldown_hours() -> int:
+        return max(1, int(os.getenv("BNPL_CONTINUATION_COOLDOWN_HOURS", "168")))
+
+    @staticmethod
+    def _continuation_risk_blocked_users() -> set[str]:
+        raw = str(os.getenv("BNPL_CONTINUATION_RISK_BLOCKED_USER_IDS", "")).strip()
+        if not raw:
+            return set()
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    async def _active_continuation_row(self, *, tx: Any, user_id: str) -> Any | None:
+        return await tx.fetchrow(
+            """
+            SELECT id, principal_v, outstanding_v, status, cooldown_until, issued_at, repaid_at
+            FROM user_continuation_credit
+            WHERE user_id = $1
+              AND status = 'active'
+            ORDER BY issued_at DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            user_id,
+        )
+
+    async def _latest_continuation_row(self, *, tx: Any, user_id: str) -> Any | None:
+        return await tx.fetchrow(
+            """
+            SELECT id, principal_v, outstanding_v, status, cooldown_until, issued_at, repaid_at
+            FROM user_continuation_credit
+            WHERE user_id = $1
+            ORDER BY issued_at DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            user_id,
+        )
+
+    async def _has_paid_topup(self, *, tx: Any, user_id: str) -> bool:
+        row = await tx.fetchrow(
+            """
+            SELECT 1
+            FROM fiat_topups
+            WHERE user_id = $1
+              AND status = 'paid'
+            LIMIT 1
+            """,
+            user_id,
+        )
+        return bool(row)
+
+    @staticmethod
+    def _preview_timestamp() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _emit_outstanding_gauge(self, outstanding_v: Decimal) -> None:
+        emit_metric(
+            "continuation_outstanding_v_gauge",
+            {"outstanding_v": self._fmt_v(outstanding_v)},
+        )
 
     def _resolve_mode(self) -> str:
         mode = str(self.provider_mode or "stripe").lower().strip()
@@ -190,7 +261,32 @@ class BillingService:
 
     @staticmethod
     def _render_qr_svg(value: str) -> bytes:
-        # Optional dependency: keep runtime resilient if qrcode is missing.
+        ok, runtime_reason = ensure_qrcode_available()
+        if not ok:
+            escaped = (
+                str(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            escaped_reason = (
+                str(runtime_reason or "unknown")
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )[:260]
+            svg = (
+                "<svg xmlns='http://www.w3.org/2000/svg' width='920' height='180'>"
+                "<rect width='100%' height='100%' fill='white'/>"
+                "<text x='12' y='24' font-family='monospace' font-size='14' fill='black'>"
+                "QR unavailable in this runtime; use checkout URL:"
+                "</text>"
+                f"<text x='12' y='56' font-family='monospace' font-size='13' fill='black'>{escaped}</text>"
+                f"<text x='12' y='88' font-family='monospace' font-size='12' fill='black'>reason: {escaped_reason}</text>"
+                "</svg>"
+            )
+            return svg.encode("utf-8")
+
         try:
             import qrcode  # type: ignore
             import qrcode.image.svg  # type: ignore
@@ -200,20 +296,27 @@ class BillingService:
             if isinstance(raw, bytes):
                 return raw
             return str(raw).encode("utf-8")
-        except Exception:
+        except Exception as exc:
+            reason = f"{exc.__class__.__name__}: {str(exc)}".strip()[:220]
             escaped = (
                 str(value)
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
             )
+            escaped_reason = (
+                reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if reason
+                else "unknown"
+            )
             svg = (
-                "<svg xmlns='http://www.w3.org/2000/svg' width='600' height='120'>"
+                "<svg xmlns='http://www.w3.org/2000/svg' width='900' height='160'>"
                 "<rect width='100%' height='100%' fill='white'/>"
                 "<text x='12' y='24' font-family='monospace' font-size='14' fill='black'>"
                 "QR unavailable in this runtime; use checkout URL:"
                 "</text>"
                 f"<text x='12' y='56' font-family='monospace' font-size='13' fill='black'>{escaped}</text>"
+                f"<text x='12' y='88' font-family='monospace' font-size='12' fill='black'>reason: {escaped_reason}</text>"
                 "</svg>"
             )
             return svg.encode("utf-8")
@@ -255,6 +358,23 @@ class BillingService:
 
         raise BillingError("Missing org_id in subscription metadata")
 
+    async def resolve_user_id_from_subscription(self, subscription: dict, tx: Any) -> str:
+        metadata = subscription.get("metadata") or {}
+        user_id = metadata.get("user_id")
+        if user_id:
+            return str(user_id)
+
+        sub_id = subscription.get("id")
+        if sub_id:
+            row = await tx.fetchrow(
+                "SELECT user_id FROM user_subscriptions WHERE stripe_subscription_id = $1",
+                sub_id,
+            )
+            if row:
+                return str(row["user_id"])
+
+        raise BillingError("Missing user_id in subscription metadata")
+
     async def _ensure_user_customer(self, user_id: str) -> str:
         row = await self.db.fetchrow(
             """
@@ -262,6 +382,8 @@ class BillingService:
             FROM fiat_topups
             WHERE user_id = $1
               AND stripe_customer_id IS NOT NULL
+              AND mode = 'stripe'
+              AND stripe_customer_id LIKE 'cus_%'
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -270,6 +392,9 @@ class BillingService:
         if row and row["stripe_customer_id"]:
             return str(row["stripe_customer_id"])
 
+        return await self._create_user_customer(user_id)
+
+    async def _create_user_customer(self, user_id: str) -> str:
         user = await self.db.fetchrow(
             "SELECT email FROM auth.users WHERE id = $1",
             user_id,
@@ -282,13 +407,28 @@ class BillingService:
         )
         return str(customer["id"])
 
+    async def _ensure_user_subscription_customer(self, user_id: str) -> str:
+        row = await self.db.fetchrow(
+            """
+            SELECT stripe_customer_id
+            FROM user_subscriptions
+            WHERE user_id = $1
+              AND stripe_customer_id IS NOT NULL
+              AND stripe_customer_id LIKE 'cus_%'
+            """,
+            user_id,
+        )
+        if row and row["stripe_customer_id"]:
+            return str(row["stripe_customer_id"])
+        return await self._create_user_customer(user_id)
+
     async def create_topup_checkout(self, *, user_id: str, amount_usd: Decimal, idempotency_key: str) -> dict:
         try:
             amount_usd = Decimal(str(amount_usd))
         except InvalidOperation as e:
             raise BillingError("Invalid amount") from e
 
-        min_usd = Decimal(os.getenv("TOPUP_MIN_USD", "1"))
+        min_usd = Decimal(os.getenv("TOPUP_MIN_USD", "10"))
         max_usd = Decimal(os.getenv("TOPUP_MAX_USD", "500"))
         if amount_usd < min_usd or amount_usd > max_usd:
             raise BillingError(f"Amount must be between {min_usd} and {max_usd} USD")
@@ -352,16 +492,38 @@ class BillingService:
                 topup_id=topup_id,
             )
         except Exception as e:
-            await self.db.execute(
-                """
-                UPDATE fiat_topups
-                SET status = 'failed', failure_reason = $2, updated_at = now()
-                WHERE id = $1 AND status = 'created'
-                """,
-                topup_id,
-                str(e)[:500],
-            )
-            raise BillingError("Unable to create Stripe Checkout session") from e
+            msg = str(e)
+            # Auto-recover stale/simulated customer ids from legacy rows.
+            if mode != "simulated" and "no such customer" in msg.lower():
+                try:
+                    customer_id = await self._create_user_customer(user_id)
+                    session = self.stripe_gateway.create_topup_checkout(
+                        customer_id=customer_id,
+                        amount_usd=amount_usd,
+                        topup_id=topup_id,
+                    )
+                except Exception as retry_e:
+                    await self.db.execute(
+                        """
+                        UPDATE fiat_topups
+                        SET status = 'failed', failure_reason = $2, updated_at = now()
+                        WHERE id = $1 AND status = 'created'
+                        """,
+                        topup_id,
+                        str(retry_e)[:500],
+                    )
+                    raise BillingError("Unable to create Stripe Checkout session") from retry_e
+            else:
+                await self.db.execute(
+                    """
+                    UPDATE fiat_topups
+                    SET status = 'failed', failure_reason = $2, updated_at = now()
+                    WHERE id = $1 AND status = 'created'
+                    """,
+                    topup_id,
+                    msg[:500],
+                )
+                raise BillingError("Unable to create Stripe Checkout session") from e
 
         row = await self.db.fetchrow(
             """
@@ -393,6 +555,321 @@ class BillingService:
 
         emit_metric("topup_checkout_created_total", {"mode": mode})
         return self._format_topup(row)
+
+    async def preview_topup_checkout(self, *, user_id: str, amount_usd: Decimal) -> dict:
+        try:
+            amount_usd = Decimal(str(amount_usd))
+        except InvalidOperation as e:
+            raise BillingError("Invalid amount") from e
+
+        min_usd = Decimal(os.getenv("TOPUP_MIN_USD", "10"))
+        max_usd = Decimal(os.getenv("TOPUP_MAX_USD", "500"))
+        if amount_usd < min_usd or amount_usd > max_usd:
+            raise BillingError(f"Amount must be between {min_usd} and {max_usd} USD")
+
+        v_credit_gross = (amount_usd * self._v_per_usd()).quantize(V_SCALE)
+        async with self.db.transaction() as tx:
+            active = await self._active_continuation_row(tx=tx, user_id=user_id)
+            outstanding_v = self._money(self._row_get(active, "outstanding_v", "0"))
+            repay_v = min(v_credit_gross, outstanding_v)
+            net_credit_v = (v_credit_gross - repay_v).quantize(V_SCALE)
+        return {
+            "amount_usd": self._fmt_usd(amount_usd),
+            "v_credit_gross": self._fmt_v(v_credit_gross),
+            "outstanding_principal_v": self._fmt_v(outstanding_v),
+            "repay_v": self._fmt_v(repay_v),
+            "net_credit_v": self._fmt_v(net_credit_v),
+            "preview_is_estimate": True,
+            "preview_generated_at": self._preview_timestamp(),
+            "preview_basis_outstanding_principal_v": self._fmt_v(outstanding_v),
+        }
+
+    async def get_continuation_status(self, *, user_id: str) -> dict:
+        async with self.db.transaction() as tx:
+            active = await self._active_continuation_row(tx=tx, user_id=user_id)
+            if active:
+                outstanding_v = self._money(self._row_get(active, "outstanding_v", "0"))
+                cooldown_until = self._row_get(active, "cooldown_until")
+                self._emit_outstanding_gauge(outstanding_v)
+                return {
+                    "eligible": False,
+                    "deny_reason": "outstanding_exists",
+                    "outstanding_principal_v": self._fmt_v(outstanding_v),
+                    "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+                }
+
+            latest = await self._latest_continuation_row(tx=tx, user_id=user_id)
+            cooldown_until = self._row_get(latest, "cooldown_until")
+            now = self._utc_now()
+            has_paid = await self._has_paid_topup(tx=tx, user_id=user_id)
+            if not has_paid:
+                return {
+                    "eligible": False,
+                    "deny_reason": "no_paid_history",
+                    "outstanding_principal_v": self._fmt_v(Decimal("0")),
+                    "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+                }
+
+            if cooldown_until and cooldown_until > now:
+                return {
+                    "eligible": False,
+                    "deny_reason": "cooldown_active",
+                    "outstanding_principal_v": self._fmt_v(Decimal("0")),
+                    "cooldown_until": cooldown_until.isoformat(),
+                }
+
+            if user_id in self._continuation_risk_blocked_users():
+                return {
+                    "eligible": False,
+                    "deny_reason": "risk_blocked",
+                    "outstanding_principal_v": self._fmt_v(Decimal("0")),
+                    "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+                }
+
+            self._emit_outstanding_gauge(Decimal("0"))
+            return {
+                "eligible": True,
+                "deny_reason": None,
+                "outstanding_principal_v": self._fmt_v(Decimal("0")),
+                "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+            }
+
+    async def claim_continuation(
+        self,
+        *,
+        user_id: str,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        idem = str(idempotency_key or f"continuation-{uuid.uuid4().hex[:16]}").strip()
+        if not idem:
+            raise BillingError("Invalid idempotency key")
+        payload_hash = self.canonical_payload_hash({"action": "claim_continuation_v1"})
+
+        async with self.db.transaction() as tx:
+            replay = await tx.fetchrow(
+                """
+                SELECT payload_hash, response_json
+                FROM continuation_claim_idempotency
+                WHERE user_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                user_id,
+                idem,
+            )
+            if replay:
+                if str(replay["payload_hash"]) != payload_hash:
+                    raise IdempotencyConflict("IDEMPOTENCY_PAYLOAD_CONFLICT")
+                emit_metric("continuation_claim_idempotent_replay_total", {"outcome": "replay"})
+                stored = replay["response_json"]
+                if isinstance(stored, str):
+                    try:
+                        stored = json.loads(stored)
+                    except Exception:
+                        stored = {"status": "denied", "deny_reason": "idempotency_replay_decode_error"}
+                return dict(stored)
+
+            active = await self._active_continuation_row(tx=tx, user_id=user_id)
+            if active:
+                response = {
+                    "status": "already_active",
+                    "principal_v": self._fmt_v(self._row_get(active, "principal_v")),
+                    "outstanding_principal_v": self._fmt_v(self._row_get(active, "outstanding_v")),
+                    "cooldown_until": self._row_get(active, "cooldown_until").isoformat()
+                    if self._row_get(active, "cooldown_until")
+                    else None,
+                }
+                emit_metric("continuation_claim_attempt_total", {"outcome": "denied", "reason": "outstanding_exists"})
+                await tx.execute(
+                    """
+                    INSERT INTO continuation_claim_idempotency (user_id, idempotency_key, payload_hash, response_json)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                    """,
+                    user_id,
+                    idem,
+                    payload_hash,
+                    json.dumps(response),
+                )
+                return response
+
+            latest = await self._latest_continuation_row(tx=tx, user_id=user_id)
+            cooldown_until = self._row_get(latest, "cooldown_until")
+            now = self._utc_now()
+            has_paid = await self._has_paid_topup(tx=tx, user_id=user_id)
+            deny_reason = None
+            if not has_paid:
+                deny_reason = "no_paid_history"
+            elif cooldown_until and cooldown_until > now:
+                deny_reason = "cooldown_active"
+            elif user_id in self._continuation_risk_blocked_users():
+                deny_reason = "risk_blocked"
+
+            if deny_reason is not None:
+                emit_metric("continuation_claim_attempt_total", {"outcome": "denied", "reason": deny_reason})
+                self._emit_outstanding_gauge(Decimal("0"))
+                response = {
+                    "status": "denied",
+                    "deny_reason": deny_reason,
+                    "outstanding_principal_v": self._fmt_v(Decimal("0")),
+                    "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+                }
+                await tx.execute(
+                    """
+                    INSERT INTO continuation_claim_idempotency (user_id, idempotency_key, payload_hash, response_json)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                    """,
+                    user_id,
+                    idem,
+                    payload_hash,
+                    json.dumps(response),
+                )
+                return response
+
+            principal_v = self._continuation_max_v()
+            cooldown_until = self._utc_now() + timedelta(hours=self._continuation_cooldown_hours())
+            row = await tx.fetchrow(
+                """
+                INSERT INTO user_continuation_credit (user_id, principal_v, outstanding_v, status, cooldown_until)
+                VALUES ($1, $2, $2, 'active', $3)
+                RETURNING id, principal_v, outstanding_v, cooldown_until
+                """,
+                user_id,
+                principal_v,
+                cooldown_until,
+            )
+            continuation_id = str(self._row_get(row, "id", ""))
+            await self.wallet.fund_from_card(
+                account_id=f"user:{user_id}",
+                amount_v=principal_v,
+                reference_id=f"continuation:{continuation_id}",
+                entry_type="continuation_credit",
+                tx=tx,
+            )
+            self._emit_outstanding_gauge(principal_v)
+            emit_metric("continuation_claim_attempt_total", {"outcome": "granted", "reason": "eligible"})
+            response = {
+                "status": "granted",
+                "principal_v": self._fmt_v(self._row_get(row, "principal_v")),
+                "outstanding_principal_v": self._fmt_v(self._row_get(row, "outstanding_v")),
+                "cooldown_until": self._row_get(row, "cooldown_until").isoformat()
+                if self._row_get(row, "cooldown_until")
+                else None,
+            }
+            await tx.execute(
+                """
+                INSERT INTO continuation_claim_idempotency (user_id, idempotency_key, payload_hash, response_json)
+                VALUES ($1, $2, $3, $4::jsonb)
+                """,
+                user_id,
+                idem,
+                payload_hash,
+                json.dumps(response),
+            )
+            return response
+
+    async def cancel_active_continuation(
+        self,
+        *,
+        user_id: str,
+        reason: str,
+        actor: str = "system",
+    ) -> dict:
+        async with self.db.transaction() as tx:
+            active = await self._active_continuation_row(tx=tx, user_id=user_id)
+            if not active:
+                return {"status": "none", "written_off_v": self._fmt_v(Decimal("0"))}
+
+            continuation_id = str(self._row_get(active, "id", ""))
+            outstanding_v = self._money(self._row_get(active, "outstanding_v", "0"))
+            if outstanding_v > 0:
+                await tx.execute(
+                    """
+                    INSERT INTO continuation_accounting_events
+                      (continuation_id, user_id, event_type, amount_v, reason, actor)
+                    VALUES ($1, $2, 'principal_written_off', $3, $4, $5)
+                    """,
+                    continuation_id,
+                    user_id,
+                    outstanding_v,
+                    str(reason)[:200],
+                    str(actor)[:80],
+                )
+                emit_metric("continuation_writeoff_total", {"reason": str(reason)[:64] or "unspecified"})
+
+            await tx.execute(
+                """
+                UPDATE user_continuation_credit
+                SET outstanding_v = 0,
+                    status = 'cancelled',
+                    repaid_at = NULL
+                WHERE id = $1
+                """,
+                continuation_id,
+            )
+            self._emit_outstanding_gauge(Decimal("0"))
+            return {"status": "cancelled", "written_off_v": self._fmt_v(outstanding_v)}
+
+    async def _apply_continuation_repayment(
+        self,
+        *,
+        tx: Any,
+        user_id: str,
+        gross_v: Decimal,
+        source_reference: str,
+        reason: str = "topup_settlement",
+    ) -> tuple[Decimal, Decimal]:
+        active = await self._active_continuation_row(tx=tx, user_id=user_id)
+        if not active:
+            self._emit_outstanding_gauge(Decimal("0"))
+            emit_metric("continuation_repayment_total", {"outcome": "no_outstanding"})
+            return Decimal("0").quantize(V_SCALE), gross_v.quantize(V_SCALE)
+
+        continuation_id = str(self._row_get(active, "id", ""))
+        outstanding_v = self._money(self._row_get(active, "outstanding_v", "0"))
+        repay_v = min(gross_v.quantize(V_SCALE), outstanding_v).quantize(V_SCALE)
+        net_credit_v = (gross_v - repay_v).quantize(V_SCALE)
+        if repay_v <= 0:
+            self._emit_outstanding_gauge(outstanding_v)
+            return Decimal("0").quantize(V_SCALE), net_credit_v
+
+        new_outstanding = (outstanding_v - repay_v).quantize(V_SCALE)
+        if new_outstanding <= Decimal("0"):
+            new_outstanding = Decimal("0").quantize(V_SCALE)
+            await tx.execute(
+                """
+                UPDATE user_continuation_credit
+                SET outstanding_v = 0,
+                    status = 'repaid',
+                    repaid_at = now()
+                WHERE id = $1
+                """,
+                continuation_id,
+            )
+            emit_metric("continuation_repayment_total", {"outcome": "full"})
+        else:
+            await tx.execute(
+                """
+                UPDATE user_continuation_credit
+                SET outstanding_v = $2
+                WHERE id = $1
+                """,
+                continuation_id,
+                new_outstanding,
+            )
+            emit_metric("continuation_repayment_total", {"outcome": "partial"})
+
+        await tx.execute(
+            """
+            INSERT INTO continuation_accounting_events
+              (continuation_id, user_id, event_type, amount_v, reason, actor)
+            VALUES ($1, $2, 'principal_repaid', $3, $4, 'system')
+            """,
+            continuation_id,
+            user_id,
+            repay_v,
+            f"{reason}:{source_reference}"[:200],
+        )
+        self._emit_outstanding_gauge(new_outstanding)
+        return repay_v, net_credit_v
 
     async def _fetch_pending_topup(self, *, tx: Any, user_id: str, mode: str) -> Any | None:
         row = await tx.fetchrow(
@@ -523,6 +1000,183 @@ class BillingService:
             row = await self._mark_expired_if_needed(tx=tx, row=row)
             return self._format_topup(row)
 
+    async def list_topup_history(self, *, user_id: str, limit: int = 50) -> dict:
+        safe_limit = max(1, min(int(limit), 200))
+        rows = await self.db.fetch(
+            """
+            SELECT id, status, mode, amount_usd, v_credit, created_at, updated_at
+            FROM fiat_topups
+            WHERE user_id = $1
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT $2
+            """,
+            user_id,
+            safe_limit,
+        )
+        v_per_usd = self._v_per_usd()
+        usd_per_v = (Decimal("1") / v_per_usd) if v_per_usd > 0 else Decimal("0")
+        entries = []
+        for row in rows:
+            ts = self._row_get(row, "updated_at") or self._row_get(row, "created_at")
+            entries.append(
+                {
+                    "topup_id": str(self._row_get(row, "id", "")),
+                    "time": ts.isoformat() if ts else None,
+                    "type": "top_up",
+                    "amount_usd": self._fmt_usd(self._row_get(row, "amount_usd")),
+                    "amount_v": self._fmt_v(self._row_get(row, "v_credit")),
+                    "amount_v_2dp": self._fmt_v_2(self._row_get(row, "v_credit")),
+                    "status": str(self._row_get(row, "status", "")),
+                    "mode": str(self._row_get(row, "mode", "")),
+                }
+            )
+        return {
+            "entries": entries,
+            "conversion": {
+                "v_per_usd": self._fmt_v(v_per_usd),
+                "usd_per_v": self._fmt_usd(usd_per_v),
+            },
+        }
+
+    async def list_activity_history(self, *, user_id: str, limit: int = 50) -> dict:
+        safe_limit = max(1, min(int(limit), 200))
+        source_limit = 300
+
+        topups = await self.db.fetch(
+            """
+            SELECT id, status, amount_usd, v_credit, updated_at, created_at
+            FROM fiat_topups
+            WHERE user_id = $1
+              AND status IN ('paid', 'failed')
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT $2
+            """,
+            user_id,
+            source_limit,
+        )
+
+        human_rounds = await self.db.fetch(
+            """
+            SELECT
+              r.id AS round_id,
+              r.game_code,
+              p.net_v,
+              COALESCE(r.resolved_at, p.created_at, r.started_at) AS ts
+            FROM human_casino_rounds r
+            JOIN human_casino_payouts p
+              ON p.round_id = r.id
+            WHERE r.user_id = $1
+            ORDER BY COALESCE(r.resolved_at, p.created_at, r.started_at) DESC
+            LIMIT $2
+            """,
+            user_id,
+            source_limit,
+        )
+
+        legacy_rounds = await self.db.fetch(
+            """
+            SELECT
+              id,
+              game_type,
+              (COALESCE(payout, 0) - COALESCE(bet_amount, 0)) AS net_v,
+              created_at
+            FROM game_history
+            WHERE user_id = $1
+              AND COALESCE(is_demo, FALSE) = FALSE
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            user_id,
+            source_limit,
+        )
+
+        def _coerce_sort_ts(raw: Any) -> datetime:
+            if isinstance(raw, datetime):
+                return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+            if isinstance(raw, str):
+                try:
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        entries: list[dict[str, Any]] = []
+
+        for row in topups:
+            ts_raw = self._row_get(row, "updated_at") or self._row_get(row, "created_at")
+            sort_ts = _coerce_sort_ts(ts_raw)
+            entries.append(
+                {
+                    "_sort_ts": sort_ts,
+                    "time": None if sort_ts == datetime.min.replace(tzinfo=timezone.utc) else sort_ts.isoformat(),
+                    "type": "top_up",
+                    "status": str(self._row_get(row, "status", "")),
+                    "amount_usd": self._fmt_usd(self._row_get(row, "amount_usd")),
+                    "amount_v": self._fmt_v(self._row_get(row, "v_credit")),
+                    "amount_v_2dp": self._fmt_v_2(self._row_get(row, "v_credit")),
+                    "reference_id": str(self._row_get(row, "id", "")),
+                    "game_code": None,
+                    "source": "fiat_topup",
+                }
+            )
+
+        for row in human_rounds:
+            net_v = Decimal(str(self._row_get(row, "net_v", "0")))
+            if net_v == 0:
+                continue
+            ts_raw = self._row_get(row, "ts")
+            sort_ts = _coerce_sort_ts(ts_raw)
+            entries.append(
+                {
+                    "_sort_ts": sort_ts,
+                    "time": None if sort_ts == datetime.min.replace(tzinfo=timezone.utc) else sort_ts.isoformat(),
+                    "type": "gameplay",
+                    "status": "won" if net_v > 0 else "lost",
+                    "amount_usd": None,
+                    "amount_v": self._fmt_v(net_v),
+                    "amount_v_2dp": self._fmt_v_2(net_v),
+                    "reference_id": str(self._row_get(row, "round_id", "")),
+                    "game_code": str(self._row_get(row, "game_code", "")),
+                    "source": "human_casino",
+                }
+            )
+
+        for row in legacy_rounds:
+            net_v = Decimal(str(self._row_get(row, "net_v", "0")))
+            if net_v == 0:
+                continue
+            ts_raw = self._row_get(row, "created_at")
+            sort_ts = _coerce_sort_ts(ts_raw)
+            entries.append(
+                {
+                    "_sort_ts": sort_ts,
+                    "time": None if sort_ts == datetime.min.replace(tzinfo=timezone.utc) else sort_ts.isoformat(),
+                    "type": "gameplay",
+                    "status": "won" if net_v > 0 else "lost",
+                    "amount_usd": None,
+                    "amount_v": self._fmt_v(net_v),
+                    "amount_v_2dp": self._fmt_v_2(net_v),
+                    "reference_id": str(self._row_get(row, "id", "")),
+                    "game_code": str(self._row_get(row, "game_type", "")),
+                    "source": "legacy_game",
+                }
+            )
+
+        entries.sort(key=lambda e: e.get("_sort_ts", datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        for entry in entries:
+            entry.pop("_sort_ts", None)
+
+        v_per_usd = self._v_per_usd()
+        usd_per_v = (Decimal("1") / v_per_usd) if v_per_usd > 0 else Decimal("0")
+        return {
+            "entries": entries[:safe_limit],
+            "conversion": {
+                "v_per_usd": self._fmt_v(v_per_usd),
+                "usd_per_v": self._fmt_usd(usd_per_v),
+            },
+        }
+
     async def get_topup_qr_svg(self, *, user_id: str, topup_id: str) -> bytes:
         status = await self.get_topup_status(user_id=user_id, topup_id=topup_id)
         value = str(status.get("qr_value") or status.get("checkout_url") or "")
@@ -530,6 +1184,15 @@ class BillingService:
             raise BillingError("Checkout unavailable")
         emit_metric("topup_qr_generated_total", {"surface": "ui"})
         return self._render_qr_svg(value)
+
+    async def render_checkout_qr_svg(self, *, value: str, surface: str = "ui") -> bytes:
+        raw = str(value or "").strip()
+        if not raw:
+            raise BillingError("Checkout URL unavailable")
+        if len(raw) > 4096:
+            raise BillingError("Checkout URL too long")
+        emit_metric("topup_qr_generated_total", {"surface": str(surface or "ui")})
+        return self._render_qr_svg(raw)
 
     async def create_org_subscription_checkout(self, *, org_id: str) -> dict:
         price_id = os.getenv("STRIPE_ORG_PRICE_ID", "").strip()
@@ -592,6 +1255,117 @@ class BillingService:
             "checkout_session_id": str(session["id"]),
             "checkout_url": str(session["url"]),
         }
+
+    async def create_user_subscription_checkout(
+        self,
+        *,
+        user_id: str,
+        monthly_amount_usd: Decimal,
+    ) -> dict:
+        try:
+            monthly_amount_usd = Decimal(str(monthly_amount_usd))
+        except InvalidOperation as e:
+            raise BillingError("Invalid monthly amount") from e
+
+        min_usd = Decimal(os.getenv("USER_SUBSCRIPTION_MIN_USD", os.getenv("TOPUP_MIN_USD", "10")))
+        max_usd = Decimal(os.getenv("USER_SUBSCRIPTION_MAX_USD", os.getenv("TOPUP_MAX_USD", "500")))
+        if monthly_amount_usd < min_usd or monthly_amount_usd > max_usd:
+            raise BillingError(f"Monthly amount must be between {min_usd} and {max_usd} USD")
+
+        customer_id = await self._ensure_user_subscription_customer(user_id)
+        checkout_attempt_id = str(uuid.uuid4())
+        session = self.stripe_gateway.create_user_subscription_checkout(
+            customer_id=customer_id,
+            user_id=str(user_id),
+            monthly_amount_usd=monthly_amount_usd,
+            checkout_attempt_id=checkout_attempt_id,
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO user_subscriptions (
+              user_id,
+              stripe_customer_id,
+              stripe_subscription_status,
+              has_active_subscription,
+              monthly_amount_usd,
+              updated_at
+            )
+            VALUES ($1, $2, 'incomplete', FALSE, $3, now())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+              stripe_customer_id = EXCLUDED.stripe_customer_id,
+              monthly_amount_usd = EXCLUDED.monthly_amount_usd,
+              updated_at = now()
+            """,
+            user_id,
+            customer_id,
+            monthly_amount_usd,
+        )
+
+        return {
+            "user_id": str(user_id),
+            "checkout_attempt_id": checkout_attempt_id,
+            "checkout_session_id": str(session["id"]),
+            "checkout_url": str(session["url"]),
+            "monthly_amount_usd": self._fmt_usd(monthly_amount_usd),
+        }
+
+    async def get_user_subscription_status(self, *, user_id: str) -> dict:
+        row = await self.db.fetchrow(
+            """
+            SELECT user_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
+                   stripe_subscription_status, has_active_subscription, cancel_at_period_end,
+                   current_period_end, monthly_amount_usd, updated_at
+            FROM user_subscriptions
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        if not row:
+            return {
+                "user_id": str(user_id),
+                "exists": False,
+                "stripe_subscription_status": "inactive",
+                "has_active_subscription": False,
+            }
+        return {
+            "user_id": str(row["user_id"]),
+            "exists": True,
+            "stripe_customer_id": row["stripe_customer_id"],
+            "stripe_subscription_id": row["stripe_subscription_id"],
+            "stripe_price_id": row["stripe_price_id"],
+            "stripe_subscription_status": row["stripe_subscription_status"] or "inactive",
+            "has_active_subscription": bool(row["has_active_subscription"]),
+            "cancel_at_period_end": bool(row["cancel_at_period_end"]),
+            "current_period_end": row["current_period_end"].isoformat() if row["current_period_end"] else None,
+            "monthly_amount_usd": self._fmt_usd(row["monthly_amount_usd"]),
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+
+    async def create_user_subscription_portal(self, *, user_id: str, flow_type: str | None = None) -> dict:
+        row = await self.db.fetchrow(
+            """
+            SELECT stripe_customer_id, stripe_subscription_id
+            FROM user_subscriptions
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        if not row or not row["stripe_customer_id"]:
+            raise BillingError("User has no Stripe customer configured")
+        if flow_type == "subscription_cancel" and not row["stripe_subscription_id"]:
+            raise BillingError("No active subscription to cancel")
+
+        try:
+            url = self.stripe_gateway.create_billing_portal(
+                customer_id=str(row["stripe_customer_id"]),
+                flow_type=flow_type,
+                subscription_id=str(row["stripe_subscription_id"]) if row["stripe_subscription_id"] else None,
+            )
+        except ValueError as e:
+            raise BillingError(str(e)) from e
+        return {"url": url}
 
     async def get_org_subscription_status(self, *, org_id: str) -> dict:
         row = await self.db.fetchrow(
@@ -682,9 +1456,9 @@ class BillingService:
             }:
                 return await self._handle_subscription_upsert(tx=tx, subscription=obj)
             if event_type == "invoice.paid":
-                return await self._apply_org_budget_credit_once(tx=tx, invoice=obj)
+                return await self._apply_invoice_credit_once(tx=tx, invoice=obj)
             if event_type == "invoice.payment_failed":
-                return await self._mark_org_subscription_past_due(tx=tx, invoice=obj)
+                return await self._mark_subscription_past_due(tx=tx, invoice=obj)
             return {"status": "ignored"}
 
     async def _handle_checkout_completed(self, *, tx: Any, session: dict, event_created: datetime | None = None) -> dict:
@@ -819,24 +1593,113 @@ class BillingService:
         if not updated:
             raise BillingError("Unable to settle top-up")
 
-        await self.wallet.fund_from_card(
-            account_id=f"user:{user_id}",
-            amount_v=Decimal(str(self._row_get(updated, "v_credit", "0"))),
-            reference_id=f"fiat_topup:{topup_id}",
+        gross_v = Decimal(str(self._row_get(updated, "v_credit", "0"))).quantize(V_SCALE)
+        _repaid_v, net_credit_v = await self._apply_continuation_repayment(
             tx=tx,
+            user_id=user_id,
+            gross_v=gross_v,
+            source_reference=f"fiat_topup:{topup_id}",
         )
+        if net_credit_v > 0:
+            await self.wallet.fund_from_card(
+                account_id=f"user:{user_id}",
+                amount_v=net_credit_v,
+                reference_id=f"fiat_topup:{topup_id}",
+                tx=tx,
+            )
         emit_metric("topup_status_transition_total", {"from": status_before, "to": "paid", "mode": mode})
         emit_metric("topup_webhook_settled_total", {"mode": mode, "status": "paid"})
         return {"status": "paid", "topup_id": topup_id, "idempotent": False}
 
     async def _handle_subscription_upsert(self, *, tx: Any, subscription: dict) -> dict:
-        org_id = await self.resolve_org_id_from_subscription(subscription, tx=tx)
+        metadata = subscription.get("metadata") or {}
+        purpose = str(metadata.get("purpose", "")).strip().lower()
+
+        if purpose == "user_subscription" or metadata.get("user_id"):
+            user_id = await self.resolve_user_id_from_subscription(subscription, tx=tx)
+            await self.sync_user_subscription_from_subscription(
+                tx=tx,
+                user_id=user_id,
+                subscription=subscription,
+            )
+            return {"status": "synced", "scope": "user", "user_id": user_id}
+
+        try:
+            org_id = await self.resolve_org_id_from_subscription(subscription, tx=tx)
+        except Exception:
+            return {"status": "ignored", "reason": "unmapped_subscription"}
         await self.sync_org_sponsorship_from_subscription(
             tx=tx,
             org_id=org_id,
             subscription=subscription,
         )
-        return {"status": "synced", "org_id": org_id}
+        return {"status": "synced", "scope": "org", "org_id": org_id}
+
+    async def sync_user_subscription_from_subscription(
+        self,
+        *,
+        tx: Any,
+        user_id: str,
+        subscription: dict,
+    ) -> None:
+        items = (subscription.get("items") or {}).get("data") or []
+        item0 = items[0] if items else {}
+        price = item0.get("price") if isinstance(item0, dict) else {}
+        price_id = price.get("id") if isinstance(price, dict) else None
+        unit_amount = price.get("unit_amount") if isinstance(price, dict) else None
+        monthly_amount_usd = None
+        if unit_amount is not None:
+            monthly_amount_usd = (Decimal(str(unit_amount)) / Decimal("100")).quantize(USD_SCALE)
+        period_end = subscription.get("current_period_end")
+
+        await tx.execute(
+            """
+            INSERT INTO user_subscriptions (
+              user_id,
+              stripe_customer_id,
+              stripe_subscription_id,
+              stripe_price_id,
+              stripe_subscription_status,
+              has_active_subscription,
+              cancel_at_period_end,
+              current_period_end,
+              monthly_amount_usd,
+              updated_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              CASE WHEN $8::bigint IS NULL THEN NULL ELSE to_timestamp($8::bigint) END,
+              $9,
+              now()
+            )
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+              stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, user_subscriptions.stripe_customer_id),
+              stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, user_subscriptions.stripe_subscription_id),
+              stripe_price_id = COALESCE(EXCLUDED.stripe_price_id, user_subscriptions.stripe_price_id),
+              stripe_subscription_status = EXCLUDED.stripe_subscription_status,
+              has_active_subscription = EXCLUDED.has_active_subscription,
+              cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+              current_period_end = EXCLUDED.current_period_end,
+              monthly_amount_usd = COALESCE(EXCLUDED.monthly_amount_usd, user_subscriptions.monthly_amount_usd),
+              updated_at = now()
+            """,
+            user_id,
+            subscription.get("customer"),
+            subscription.get("id"),
+            price_id,
+            subscription.get("status", "inactive"),
+            self.compute_has_active_subscription(subscription),
+            bool(subscription.get("cancel_at_period_end", False)),
+            int(period_end) if period_end else None,
+            monthly_amount_usd,
+        )
+
+    async def _apply_invoice_credit_once(self, *, tx: Any, invoice: dict) -> dict:
+        user_res = await self._apply_user_subscription_credit_once(tx=tx, invoice=invoice)
+        if str(user_res.get("status")) not in {"user-not-found", "ignored"}:
+            return user_res
+        return await self._apply_org_budget_credit_once(tx=tx, invoice=invoice)
 
     async def sync_org_sponsorship_from_subscription(
         self,
@@ -905,6 +1768,144 @@ class BillingService:
         )
         return {"status": "credited"}
 
+    async def _apply_user_subscription_credit_once(self, *, tx: Any, invoice: dict) -> dict:
+        subscription_id = invoice.get("subscription")
+        invoice_id = invoice.get("id")
+        if not subscription_id or not invoice_id:
+            return {"status": "ignored"}
+
+        row = await tx.fetchrow(
+            """
+            SELECT user_id, stripe_customer_id
+            FROM user_subscriptions
+            WHERE stripe_subscription_id = $1
+            FOR UPDATE
+            """,
+            subscription_id,
+        )
+        if not row:
+            customer_id = invoice.get("customer")
+            if customer_id:
+                row = await tx.fetchrow(
+                    """
+                    SELECT user_id, stripe_customer_id
+                    FROM user_subscriptions
+                    WHERE stripe_customer_id = $1
+                    FOR UPDATE
+                    """,
+                    str(customer_id),
+                )
+                if row:
+                    # Stripe events are not ordered; persist subscription id as soon as we can map it.
+                    await tx.execute(
+                        """
+                        UPDATE user_subscriptions
+                        SET stripe_subscription_id = COALESCE(stripe_subscription_id, $2),
+                            updated_at = now()
+                        WHERE user_id = $1
+                        """,
+                        str(row["user_id"]),
+                        str(subscription_id),
+                    )
+        if not row:
+            return {"status": "user-not-found"}
+
+        amount_paid = (Decimal(str(invoice.get("amount_paid", 0))) / Decimal("100")).quantize(USD_SCALE)
+        if amount_paid <= 0:
+            return {"status": "ignored"}
+
+        user_id = str(row["user_id"])
+        v_per_usd = self._v_per_usd()
+        if v_per_usd <= 0:
+            raise BillingError("Invalid V_PER_USD configuration")
+        v_credit = (amount_paid * v_per_usd).quantize(V_SCALE)
+        idem_key = f"stripe_user_invoice:{invoice_id}"
+        payload_hash = self.canonical_payload_hash(
+            {
+                "subscription_id": str(subscription_id),
+                "invoice_id": str(invoice_id),
+                "amount_paid": str(amount_paid),
+                "currency": str(invoice.get("currency", "usd")),
+            }
+        )
+
+        existing = await tx.fetchrow(
+            """
+            SELECT id, status
+            FROM fiat_topups
+            WHERE user_id = $1 AND idempotency_key = $2
+            FOR UPDATE
+            """,
+            user_id,
+            idem_key,
+        )
+        if existing and str(existing["status"]) == "paid":
+            return {"status": "already_credited", "topup_id": str(existing["id"])}
+
+        topup_id = str(existing["id"]) if existing else str(uuid.uuid4())
+        payment_intent = invoice.get("payment_intent")
+        if not existing:
+            await tx.execute(
+                """
+                INSERT INTO fiat_topups
+                  (id, user_id, amount_usd, v_credit, currency, status, idempotency_key, idempotency_payload_hash,
+                   stripe_customer_id, stripe_payment_intent_id, mode, expires_at, updated_at)
+                VALUES ($1, $2, $3, $4, 'usd', 'paid', $5, $6, $7, $8, 'stripe', NULL, now())
+                """,
+                topup_id,
+                user_id,
+                amount_paid,
+                v_credit,
+                idem_key,
+                payload_hash,
+                row["stripe_customer_id"],
+                str(payment_intent) if payment_intent else None,
+            )
+        else:
+            await tx.execute(
+                """
+                UPDATE fiat_topups
+                SET status = 'paid',
+                    amount_usd = $2,
+                    v_credit = $3,
+                    idempotency_payload_hash = $4,
+                    stripe_customer_id = COALESCE($5, stripe_customer_id),
+                    stripe_payment_intent_id = COALESCE($6, stripe_payment_intent_id),
+                    mode = 'stripe',
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                topup_id,
+                amount_paid,
+                v_credit,
+                payload_hash,
+                row["stripe_customer_id"],
+                str(payment_intent) if payment_intent else None,
+            )
+
+        _repaid_v, net_credit_v = await self._apply_continuation_repayment(
+            tx=tx,
+            user_id=user_id,
+            gross_v=v_credit,
+            source_reference=f"fiat_topup:{topup_id}",
+            reason="invoice_settlement",
+        )
+        if net_credit_v > 0:
+            await self.wallet.fund_from_card(
+                account_id=f"user:{user_id}",
+                amount_v=net_credit_v,
+                reference_id=f"fiat_topup:{topup_id}",
+                tx=tx,
+            )
+        emit_metric("user_subscription_invoice_credited_total", {"status": "paid"})
+        return {"status": "credited", "topup_id": topup_id, "user_id": user_id}
+
+    async def _mark_subscription_past_due(self, *, tx: Any, invoice: dict) -> dict:
+        user = await self._mark_user_subscription_past_due(tx=tx, invoice=invoice)
+        if str(user.get("status")) == "past_due":
+            return user
+        return await self._mark_org_subscription_past_due(tx=tx, invoice=invoice)
+
     async def _mark_org_subscription_past_due(self, *, tx: Any, invoice: dict) -> dict:
         subscription_id = invoice.get("subscription")
         if not subscription_id:
@@ -920,6 +1921,25 @@ class BillingService:
             subscription_id,
         )
         return {"status": "past_due"}
+
+    async def _mark_user_subscription_past_due(self, *, tx: Any, invoice: dict) -> dict:
+        subscription_id = invoice.get("subscription")
+        if not subscription_id:
+            return {"status": "ignored"}
+        row = await tx.fetchrow(
+            """
+            UPDATE user_subscriptions
+            SET stripe_subscription_status = 'past_due',
+                has_active_subscription = FALSE,
+                updated_at = now()
+            WHERE stripe_subscription_id = $1
+            RETURNING user_id
+            """,
+            subscription_id,
+        )
+        if not row:
+            return {"status": "user-not-found"}
+        return {"status": "past_due", "scope": "user", "user_id": str(row["user_id"])}
 
     @staticmethod
     def _format_topup(row: Any) -> dict:

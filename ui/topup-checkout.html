@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Top-Up Checkout</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .checkout-link { word-break: break-all; color: var(--aqua); }
+      .field-stack { display:flex; flex-direction:column; gap:6px; margin:.8rem 0; }
+      .field-stack input {
+        border: 1px solid var(--line);
+        background: var(--input-bg);
+        color: var(--input-text);
+        border-radius: 8px;
+        padding: .6rem .7rem;
+        font-family: var(--font-mono);
+      }
+      .field-hint { color: var(--grey-light); font-size: 11px; font-family: var(--font-mono); }
+      .qr-wrap { margin-top: 10px; }
+      .qr {
+        width: min(300px, 80vw);
+        background: var(--qr-bg);
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">TOP-UP</div>
+          <h1 class="page-title">Create one-time top-up checkout.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Add funds with a one-time payment. Minimum amount is $10.00.</p>
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to create top-up checkout</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Ftopup-checkout">OpenVegas login</a></div>
+      </section>
+
+      <section id="authContent" hidden>
+        <article class="card">
+          <div class="text-mono-xs">CHECKOUT</div>
+          <h2 class="card-title">Create top-up checkout</h2>
+          <div class="field-stack">
+            <label class="text-mono-xs" for="topupAmount">Top-up amount (USD)</label>
+            <input id="topupAmount" type="number" min="10" max="500" step="0.01" value="20.00" />
+            <div class="field-hint">Minimum $10.00. You can choose any amount within configured limits.</div>
+          </div>
+          <div class="cta-row">
+            <button id="createCheckout" class="btn btn-primary" type="button">Create checkout</button>
+            <a class="btn" href="/ui/subscription">Go to subscription</a>
+            <a class="btn" href="/ui/balance">Open balance</a>
+          </div>
+          <p id="checkoutMeta" class="text-mono-sm" style="margin-top:.8rem;">No checkout yet.</p>
+          <a id="checkoutUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
+          <div id="checkoutQrWrap" class="qr-wrap" hidden>
+            <div class="text-mono-xs" style="margin: 8px 0;">Scan QR to pay</div>
+            <img id="checkoutQrImage" class="qr" alt="Top-up checkout QR" hidden />
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
+      import { apiFetch, apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/topup-checkout");
+
+      try {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          showSignedOutPanel();
+        } else {
+          showAuthedContent();
+          const MIN_BILLING_USD = 10;
+
+          byId("createCheckout")?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            const link = byId("checkoutUrl");
+            const qrWrap = byId("checkoutQrWrap");
+            const qrImage = byId("checkoutQrImage");
+            const amountInput = byId("topupAmount");
+            const rawAmount = String(amountInput?.value || "20.00").trim();
+            // Open an immediate same-origin pending page in click context to avoid popup blockers/blank tabs.
+            const checkoutTab = window.open("/ui/checkout-pending", "_blank");
+            if (checkoutTab && !checkoutTab.closed) {
+              try { checkoutTab.focus(); } catch {}
+            }
+            out.textContent = "creating...";
+            if (qrWrap) qrWrap.hidden = true;
+            if (qrImage) qrImage.hidden = true;
+            try {
+              const parsed = Number(rawAmount);
+              if (!Number.isFinite(parsed) || parsed < MIN_BILLING_USD) {
+                throw new Error(`Minimum top-up is $${MIN_BILLING_USD.toFixed(2)}.`);
+              }
+              const preview = await apiJson("/billing/topups/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              const previewLine = `preview: repay ${preview.repay_v} $V, net credit ${preview.net_credit_v} $V`;
+              out.textContent = `${previewLine} · estimate only (final at settlement)`;
+              const data = await apiJson("/billing/topups/checkout", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `topup_id=${data.topup_id} status=${data.status}`;
+              if (data.checkout_url) {
+                link.hidden = false;
+                link.href = data.checkout_url;
+                link.textContent = data.checkout_url;
+                // Keep this page visible for QR/status context and open checkout in a new tab.
+                if (checkoutTab && !checkoutTab.closed) {
+                  try {
+                    checkoutTab.location.replace(data.checkout_url);
+                    checkoutTab.focus();
+                  } catch {
+                    checkoutTab.location.href = data.checkout_url;
+                  }
+                } else {
+                  out.textContent += " · popup blocked; use the checkout link below";
+                }
+              }
+              if (data.topup_id) {
+                out.insertAdjacentHTML("beforeend", ` · <a class="checkout-link" href="/ui/topup/${data.topup_id}">open status page</a>`);
+                if (qrImage && qrWrap) {
+                  const qrRes = await apiFetch(`/billing/topups/${encodeURIComponent(data.topup_id)}/qr.svg`, {
+                    method: "GET",
+                  });
+                  if (qrRes.ok) {
+                    const svg = await qrRes.text();
+                    if (svg.includes("QR unavailable in this runtime")) {
+                      out.textContent += " · QR unavailable on server runtime";
+                    }
+                    qrImage.hidden = false;
+                    qrWrap.hidden = false;
+                    qrImage.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+                  } else {
+                    const detail = await qrRes.text().catch(() => "");
+                    out.textContent += ` · QR fetch failed (${qrRes.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`;
+                  }
+                }
+              }
+            } catch (err) {
+              if (checkoutTab && !checkoutTab.closed) {
+                try { checkoutTab.close(); } catch {}
+              }
+              out.textContent = String(err);
+            }
+          });
+        }
+      } catch (err) {
+        showSignedOutPanel();
+        const panel = byId("authState");
+        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
+      }
+    </script>
+  </body>
+</html>

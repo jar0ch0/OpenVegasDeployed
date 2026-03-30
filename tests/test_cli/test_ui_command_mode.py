@@ -21,16 +21,9 @@ def test_ui_defaults_to_inline(monkeypatch):
     assert called == {"no_render": True, "render_timeout_sec": 3.0}
 
 
-def test_ui_full_uses_legacy_wizard(monkeypatch):
-    called = {"full": False}
-
-    def _fake_full() -> None:
-        called["full"] = True
-
-    monkeypatch.setattr("openvegas.tui.wizard.run_wizard", _fake_full)
-
+def test_ui_full_flag_is_rejected():
     runner = CliRunner()
     result = runner.invoke(cli, ["ui", "--full"])
 
-    assert result.exit_code == 0
-    assert called["full"] is True
+    assert result.exit_code != 0
+    assert "No such option: --full" in result.output

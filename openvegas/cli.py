@@ -10,13 +10,16 @@ import os
 import re
 import select
 import shutil
+import subprocess
 import sys
 import time
 import uuid
+import webbrowser
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 import click
 from rich.console import Console
@@ -35,8 +38,12 @@ from openvegas.agent.local_tools import (
 from openvegas.agent.runtime_contracts import ToolPolicyDecision, evaluate_tool_policy
 from openvegas.agent.runtime_contracts import result_submission_hash as compute_result_submission_hash
 from openvegas.agent.tool_cas import redact_hash_truncate
-from openvegas.config import load_config
-from openvegas.ide.show_diff import normalize_show_diff_result
+from openvegas.config import load_config, save_config
+from openvegas.ide.show_diff import (
+    is_valid_show_diff_payload,
+    normalize_show_diff_result,
+    redact_show_diff_payload_shape,
+)
 from openvegas.telemetry import emit_metric
 from openvegas.tui.approval_menu import (
     ApprovalDecision,
@@ -60,6 +67,8 @@ from openvegas.tui.chat_renderer import (
     render_tool_result,
     render_user_input,
 )
+from openvegas.tui.avatar_state import map_lifecycle_event_to_state, map_tool_event_to_avatar_state
+from openvegas.tui.dealer_panel import DealerPanel
 from openvegas.tui.confetti import render_result_panel
 from openvegas.tui.diff_reviewer import (
     ParsedUnifiedPatch,
@@ -87,16 +96,35 @@ EXTERNAL_TOOL_ALIASES = {
     "read": "fs_read",
     "search": "fs_search",
     "write": "fs_apply_patch",
+    "findandreplace": "fs_apply_patch",
+    "find_and_replace": "fs_apply_patch",
+    "single_find_and_replace": "fs_apply_patch",
+    "insertatend": "fs_apply_patch",
+    "insert_at_end": "fs_apply_patch",
+    "append_to_end": "fs_apply_patch",
     "bash": "shell_run",
     "list": "fs_list",
 }
 CANONICAL_EXTERNAL_TOOL_NAMES = tuple(sorted(EXTERNAL_TOOL_ALIASES.keys()))
+
+FIND_REPLACE_TOOL_TOKENS = {
+    "findandreplace",
+    "find_and_replace",
+    "single_find_and_replace",
+}
+INSERT_AT_END_TOOL_TOKENS = {
+    "insertatend",
+    "insert_at_end",
+    "append_to_end",
+}
 
 RETRYABLE_MUTATION_ERRORS = {
     "stale_projection",
     "active_mutation_in_progress",
     "idempotency_conflict",
 }
+_VSCODE_DIFF_PROMPTED = False
+_ENV_DEFAULTS_BOOTSTRAPPED = False
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -106,6 +134,13 @@ def _sha256_hex(data: bytes) -> str:
 def run_async(coro):
     """Run an async function from sync Click context."""
     return asyncio.run(coro)
+
+
+def _is_simulated_checkout_url(url: str) -> bool:
+    try:
+        return urlparse(str(url or "")).netloc.lower() == "checkout.openvegas.local"
+    except Exception:
+        return False
 
 
 def _drain_stdin_buffer(window_ms: int = 0) -> list[str]:
@@ -153,10 +188,65 @@ def _drain_stdin_buffer(window_ms: int = 0) -> list[str]:
     return [ln.rstrip("\r") for ln in text.splitlines() if ln.rstrip("\r")]
 
 
-def _path_hint_from_message(msg: str) -> str | None:
+def _load_openvegas_env_defaults_from_dotenv() -> None:
+    """Load OPENVEGAS_* defaults from local .env without overriding exported env."""
+    global _ENV_DEFAULTS_BOOTSTRAPPED
+    if _ENV_DEFAULTS_BOOTSTRAPPED:
+        return
+    _ENV_DEFAULTS_BOOTSTRAPPED = True
+
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parents[1] / ".env",
+    ]
+    loaded: set[str] = set()
+    for env_path in candidates:
+        try:
+            key = str(env_path.resolve())
+        except Exception:
+            key = str(env_path)
+        if key in loaded:
+            continue
+        loaded.add(key)
+        if not env_path.exists() or not env_path.is_file():
+            continue
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            continue
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            env_name = name.strip()
+            if not env_name.startswith("OPENVEGAS_"):
+                continue
+            if env_name in os.environ:
+                continue
+            os.environ[env_name] = value.strip().strip("'\"")
+
+
+def _path_hint_candidates(msg: str) -> list[str]:
     text = (msg or "").strip()
     if not text:
-        return None
+        return []
+
+    def _clean_candidate(raw: str) -> str:
+        token = str(raw or "").strip()
+        token = token.strip("`'\"")
+        token = token.lstrip("([{")
+        token = token.rstrip(":;,)]}!?")
+        token = token.rstrip(".")
+        return token.strip()
+
+    def _looks_like_file_path(token: str) -> bool:
+        t = str(token or "").strip()
+        if not t:
+            return False
+        if "/" in t or t.startswith("."):
+            return True
+        return bool(re.search(r"\.[A-Za-z0-9_]{1,8}$", Path(t).name))
 
     candidates: list[str] = []
     for pat in (
@@ -165,27 +255,65 @@ def _path_hint_from_message(msg: str) -> str | None:
         r"`([^`\n]+)`",
     ):
         for m in re.finditer(pat, text):
-            token = m.group(1).strip()
-            if token:
+            token = _clean_candidate(m.group(1))
+            if token and _looks_like_file_path(token):
                 candidates.append(token)
 
     for candidate in re.findall(r"(/[^\s\"'`]+)", text):
-        candidates.append(candidate.strip())
+        cleaned = _clean_candidate(candidate)
+        if cleaned:
+            candidates.append(cleaned)
 
     for token in re.findall(r"(?<!\w)([A-Za-z0-9_.\-/]+)(?!\w)", text):
-        t = token.strip(":;)]}>'\"`")
+        t = _clean_candidate(token)
         if not t:
+            continue
+        if t.endswith("."):
+            continue
+        if "/" not in t and "." in Path(t).name and not re.search(r"\.[A-Za-z0-9_]{1,8}$", Path(t).name):
             continue
         if "/" in t or t.startswith(".") or "." in Path(t).name:
             candidates.append(t)
 
+    out: list[str] = []
     seen: set[str] = set()
-    fallback_nonexistent: str | None = None
     for candidate in candidates:
         c = candidate.strip()
         if not c or c in seen:
             continue
         seen.add(c)
+        out.append(c)
+    return out
+
+
+def _merge_chat_prompt_and_buffered_lines(first: str, extras: list[str]) -> str:
+    base = str(first or "").strip()
+    if not extras:
+        return base
+    cleaned: list[str] = []
+    for line in extras:
+        token = str(line or "").strip()
+        if not token:
+            continue
+        if token == base:
+            continue
+        if token.lower() in {"chat", "chat:"}:
+            continue
+        cleaned.append(token)
+    if not cleaned:
+        return base
+    if not base:
+        return "\n".join(cleaned).strip()
+    return "\n".join([base, *cleaned]).strip()
+
+
+def _path_hint_from_message(msg: str) -> str | None:
+    candidates = _path_hint_candidates(msg)
+    if not candidates:
+        return None
+
+    fallback_nonexistent: str | None = None
+    for c in candidates:
         p = Path(c)
         if p.exists():
             return str(p)
@@ -197,6 +325,58 @@ def _path_hint_from_message(msg: str) -> str | None:
         if fallback_nonexistent is None and ("/" in c or c.startswith(".") or "." in p.name):
             fallback_nonexistent = c
     return fallback_nonexistent
+
+
+def _path_hints_from_message(msg: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in _path_hint_candidates(msg):
+        p = Path(c)
+        if p.exists():
+            key = str(p.resolve())
+        else:
+            key = c
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    if len(out) <= 1:
+        return out
+
+    existing: list[str] = []
+    for c in out:
+        p = Path(c)
+        if p.exists():
+            existing.append(c)
+            continue
+        if not p.is_absolute():
+            local = Path.cwd() / p
+            if local.exists():
+                existing.append(c)
+
+    if len(existing) == 1:
+        chosen = existing[0]
+        chosen_name = Path(chosen).name.lower()
+        chosen_path = str(Path(chosen)).replace("\\", "/").lower()
+        collapsible = True
+        for c in out:
+            if c == chosen:
+                continue
+            token = str(c).strip().replace("\\", "/")
+            token_l = token.lower()
+            token_name = Path(token).name.lower()
+            if token_name == chosen_name:
+                continue
+            token_suffix = token_l.lstrip("./")
+            if token_suffix.startswith("/"):
+                token_suffix = token_suffix[1:]
+            if chosen_path.endswith("/" + token_suffix):
+                continue
+            collapsible = False
+            break
+        if collapsible:
+            return [chosen]
+    return out
 
 
 def _search_pattern_hint_from_message(msg: str) -> str | None:
@@ -467,6 +647,318 @@ def _build_unified_patch(*, old_text: str, new_text: str, rel_path: str) -> str 
     return "".join(line + ("\n" if not line.endswith("\n") else "") for line in diff_lines)
 
 
+def _has_explicit_replace_wording(msg: str) -> bool:
+    text = (msg or "").lower()
+    if not text.strip():
+        return False
+    return bool(
+        re.search(
+            r"\b(?:replace\s+all|replace\s+entire|replace\s+whole|rewrite\s+entire|rewrite\s+whole|overwrite|full\s+rewrite|replace\s+the\s+file)\b",
+            text,
+        )
+    )
+
+
+def _has_explicit_replace_intent_from_arguments(arguments: dict[str, Any]) -> bool:
+    raw_mode = str(arguments.get("write_mode") or arguments.get("mode") or "").strip().lower()
+    operation_kind = str(arguments.get("operation_kind") or "").strip().lower()
+    explicit_flag = arguments.get("explicit_replace_intent")
+    if isinstance(explicit_flag, bool) and explicit_flag:
+        return True
+    if isinstance(arguments.get("replace_all"), bool) and bool(arguments.get("replace_all")):
+        return True
+    if raw_mode in {"replace", "full_replace", "replace_all"}:
+        return True
+    if operation_kind in {"full_replace", "replace_all"}:
+        return True
+    return False
+
+
+def _validate_patch_safety(*, old_text: str, new_text: str, intent: str) -> tuple[bool, str | None]:
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+
+    if intent == "append":
+        old_norm = old_text.rstrip("\n")
+        new_norm = new_text.rstrip("\n")
+        if not new_norm.startswith(old_norm):
+            return False, "append_intent_but_existing_content_modified"
+
+    # NOTE: This is intentionally a coarse v1 guardrail heuristic, not semantic diff correctness.
+    if intent in {"find_replace", "insert_before", "insert_after", "rewrite_section"}:
+        deleted_count = sum(1 for line in old_lines if line not in new_lines)
+        if len(old_lines) > 10 and deleted_count > (len(old_lines) * 0.5):
+            return False, "targeted_edit_but_majority_replacement"
+
+    if old_lines and not new_text.strip():
+        return False, "edit_would_empty_file"
+
+    return True, None
+
+
+def _emit_intent_validator_result(*, intent: str, reason: str | None = None) -> None:
+    token = str(intent or "unknown").strip() or "unknown"
+    if reason is None:
+        emit_metric("intent_validator_pass_total", {"intent": token})
+        return
+
+    r = str(reason or "unknown").strip() or "unknown"
+    emit_metric("intent_validator_block_total", {"intent": token, "reason": r})
+    if r == "append_intent_but_existing_content_modified":
+        emit_metric("intent_append_rejected_replace_like_patch_total", {"intent": token})
+    if r == "targeted_edit_but_majority_replacement":
+        emit_metric("intent_replace_large_deletion_blocked_total", {"intent": token})
+        if token == "append":
+            emit_metric("intent_append_large_deletion_blocked_total", {"intent": token})
+    if r == "intent_anchor_not_found":
+        emit_metric("intent_anchor_not_found_total", {"intent": token})
+
+
+def _find_all_exact_matches(haystack: str, needle: str) -> list[tuple[int, int]]:
+    if needle == "":
+        return []
+    matches: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        idx = haystack.find(needle, pos)
+        if idx < 0:
+            break
+        matches.append((idx, idx + len(needle)))
+        pos = idx + len(needle)
+    return matches
+
+
+def _replace_exact_matches(
+    *,
+    text: str,
+    matches: list[tuple[int, int]],
+    replacement: str,
+    replace_all: bool,
+) -> str:
+    if not matches:
+        return text
+    if replace_all:
+        out = text
+        for start, end in reversed(matches):
+            out = out[:start] + replacement + out[end:]
+        return out
+    start, end = matches[0]
+    return text[:start] + replacement + text[end:]
+
+
+def _prepare_find_replace_patch(
+    *,
+    workspace_root: str,
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    path = _coerce_nonempty_text(arguments.get("filepath")) or _coerce_nonempty_text(arguments.get("path"))
+    if path is None:
+        path = _deep_find_keyed_string(arguments, ("filepath", "path", "file_path", "file", "target_path"))
+    old_string = _coerce_nonempty_text_preserve(arguments.get("old_string"))
+    if old_string is None:
+        old_string = _deep_find_keyed_string(arguments, ("old_string", "find", "old", "from", "needle"))
+    new_string = arguments.get("new_string")
+    if not isinstance(new_string, str):
+        deep_new = _deep_find_keyed_string(arguments, ("new_string", "replacement", "replace", "to", "new"))
+        new_string = deep_new if isinstance(deep_new, str) else None
+    replace_all = bool(arguments.get("replace_all", False))
+
+    if not path or old_string is None or new_string is None:
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "FindAndReplace requires filepath, old_string, and new_string.",
+        }
+    if old_string == "":
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "FindAndReplace old_string must not be empty.",
+        }
+    if old_string == new_string:
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "FindAndReplace old_string and new_string must differ.",
+        }
+
+    target = _safe_workspace_resolve(workspace_root, path)
+    if target is None:
+        return None, {
+            "status": "blocked",
+            "error": "workspace_path_out_of_bounds",
+            "detail": "FindAndReplace target is outside workspace root.",
+        }
+    if not target.exists() or not target.is_file():
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "FindAndReplace target must be an existing file.",
+        }
+
+    loaded, err = _read_existing_text_for_write(target)
+    if err is not None:
+        return None, {
+            "status": "blocked",
+            "error": "binary_file_unsupported",
+            "detail": err,
+        }
+    old_text = loaded or ""
+    matches = _find_all_exact_matches(old_text, old_string)
+    if not matches:
+        return None, {
+            "status": "blocked",
+            "error": "old_string_not_found",
+            "detail": "FindAndReplace old_string not found in file.",
+        }
+    if (not replace_all) and len(matches) > 1:
+        return None, {
+            "status": "blocked",
+            "error": "old_string_not_unique",
+            "detail": "FindAndReplace old_string matched multiple regions; use replace_all or include more context.",
+        }
+
+    new_text = _replace_exact_matches(
+        text=old_text,
+        matches=matches,
+        replacement=new_string,
+        replace_all=replace_all,
+    )
+    ok, reason = _validate_patch_safety(old_text=old_text, new_text=new_text, intent="find_replace")
+    if not ok:
+        _emit_intent_validator_result(intent="find_replace", reason=str(reason or "unknown"))
+        return None, {
+            "status": "blocked",
+            "error": str(reason or "targeted_edit_but_majority_replacement"),
+            "detail": "FindAndReplace safety validation rejected generated patch.",
+        }
+    _emit_intent_validator_result(intent="find_replace")
+
+    rel_path = _safe_rel_from_workspace(workspace_root, target)
+    patch = _build_unified_patch(old_text=old_text, new_text=new_text, rel_path=rel_path)
+    if patch is None:
+        return None, {
+            "status": "noop",
+            "tool_name": "fs_apply_patch",
+            "error": "no_change",
+            "detail": "FindAndReplace produced no changes.",
+        }
+    return {
+        "arguments": {"patch": patch, "path": rel_path},
+        "meta": {
+            "source": "find_replace_abi",
+            "path": rel_path,
+            "existing_file": True,
+            "old_contents": old_text,
+            "new_contents": new_text,
+            "operation_kind": "find_replace",
+            "selection_basis": "exact_string",
+            "replace_all": bool(replace_all),
+        },
+    }, None
+
+
+def _prepare_insert_at_end_patch(
+    *,
+    workspace_root: str,
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _already_at_end(existing_text: str, append_text: str) -> bool:
+        if not existing_text:
+            return False
+        candidate = append_text.rstrip("\n")
+        if not candidate:
+            return False
+        return existing_text.rstrip("\n").endswith(candidate)
+
+    path = _coerce_nonempty_text(arguments.get("filepath")) or _coerce_nonempty_text(arguments.get("path"))
+    if path is None:
+        path = _deep_find_keyed_string(arguments, ("filepath", "path", "file_path", "file", "target_path"))
+    content: str | None = None
+    raw_content = arguments.get("content")
+    if isinstance(raw_content, str):
+        content = raw_content
+    if content is None:
+        content = _deep_find_keyed_string(arguments, ("content", "new_content", "text", "value"))
+    if not path or content is None:
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "InsertAtEnd requires filepath and content.",
+        }
+
+    target = _safe_workspace_resolve(workspace_root, path)
+    if target is None:
+        return None, {
+            "status": "blocked",
+            "error": "workspace_path_out_of_bounds",
+            "detail": "InsertAtEnd target is outside workspace root.",
+        }
+    if target.exists() and not target.is_file():
+        return None, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": "InsertAtEnd target must be a file.",
+        }
+
+    old_text = ""
+    exists = target.exists()
+    if exists:
+        loaded, err = _read_existing_text_for_write(target)
+        if err is not None:
+            return None, {
+                "status": "blocked",
+                "error": "binary_file_unsupported",
+                "detail": err,
+            }
+        old_text = loaded or ""
+
+    if _already_at_end(old_text, content):
+        return None, {
+            "status": "noop",
+            "tool_name": "fs_apply_patch",
+            "error": "no_change",
+            "detail": "InsertAtEnd content already present at end of file.",
+        }
+
+    separator = ""
+    if old_text and content and (not old_text.endswith("\n")):
+        separator = "\n"
+    new_text = f"{old_text}{separator}{content}"
+    ok, reason = _validate_patch_safety(old_text=old_text, new_text=new_text, intent="append")
+    if not ok:
+        _emit_intent_validator_result(intent="append", reason=str(reason or "unknown"))
+        return None, {
+            "status": "blocked",
+            "error": str(reason or "append_intent_but_existing_content_modified"),
+            "detail": "InsertAtEnd safety validation rejected generated patch.",
+        }
+    _emit_intent_validator_result(intent="append")
+
+    rel_path = _safe_rel_from_workspace(workspace_root, target)
+    patch = _build_unified_patch(old_text=old_text, new_text=new_text, rel_path=rel_path)
+    if patch is None:
+        return None, {
+            "status": "noop",
+            "tool_name": "fs_apply_patch",
+            "error": "no_change",
+            "detail": "InsertAtEnd produced no changes.",
+        }
+    return {
+        "arguments": {"patch": patch, "path": rel_path},
+        "meta": {
+            "source": "insert_at_end_abi",
+            "path": rel_path,
+            "append_content": content,
+            "existing_file": bool(exists),
+            "old_contents": old_text,
+            "new_contents": new_text,
+            "operation_kind": "append",
+            "selection_basis": "eof",
+        },
+    }, None
+
+
 def _split_unified_patch_hunks(patch_text: str) -> tuple[list[str], list[list[str]]]:
     parsed = parse_unified_patch_terminal(patch_text)
     if parsed.parse_error:
@@ -509,10 +1001,16 @@ class CompletionCriteria:
     required_files: tuple[str, ...] = ()
     required_headings: dict[str, tuple[str, ...]] = field(default_factory=dict)
     required_nonempty_sections: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    requires_mutation: bool = False
 
     @property
     def active(self) -> bool:
-        return bool(self.required_files or self.required_headings or self.required_nonempty_sections)
+        return bool(
+            self.required_files
+            or self.required_headings
+            or self.required_nonempty_sections
+            or self.requires_mutation
+        )
 
 
 @dataclass(frozen=True)
@@ -623,10 +1121,17 @@ def _extract_named_sections_from_message(user_message: str) -> list[str]:
     return out
 
 
-def _build_completion_criteria(user_message: str) -> CompletionCriteria:
+def _build_completion_criteria(user_message: str, *, planner_edit_intent: bool = False) -> CompletionCriteria:
     files = _extract_required_files_from_message(user_message)
+    if not files:
+        hints = _path_hints_from_message(user_message)
+        if len(hints) == 1:
+            files = [hints[0]]
     sections = _extract_named_sections_from_message(user_message)
-    if not files and not sections:
+    requires_mutation = (_has_patch_intent(user_message) or planner_edit_intent) and (
+        bool(files) or _has_explicit_file_target(user_message)
+    )
+    if not files and not sections and not requires_mutation:
         return CompletionCriteria()
 
     required_files = tuple(files)
@@ -640,6 +1145,7 @@ def _build_completion_criteria(user_message: str) -> CompletionCriteria:
         required_files=required_files,
         required_headings=required_headings,
         required_nonempty_sections=required_nonempty,
+        requires_mutation=requires_mutation,
     )
 
 
@@ -1131,6 +1637,7 @@ def _prepare_write_patch(
     *,
     workspace_root: str,
     arguments: dict[str, Any],
+    user_message: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     path = _coerce_nonempty_text(arguments.get("filepath")) or _coerce_nonempty_text(arguments.get("path"))
     if path is None:
@@ -1170,6 +1677,12 @@ def _prepare_write_patch(
         }
 
     rel_path = _safe_rel_from_workspace(workspace_root, target)
+    raw_mode = str(arguments.get("write_mode") or arguments.get("mode") or "").strip().lower()
+    append_mode = raw_mode in {"append", "append_bottom", "append_end"}
+    explicit_replace_intent = _has_explicit_replace_intent_from_arguments(arguments) or _has_explicit_replace_wording(
+        str(user_message or "")
+    )
+
     old_text = ""
     if exists:
         loaded, err = _read_existing_text_for_write(target)
@@ -1180,15 +1693,43 @@ def _prepare_write_patch(
                 "detail": err,
             }
         old_text = loaded or ""
-        if old_text == content:
+        if (not append_mode) and old_text == content:
             return None, {
                 "status": "noop",
                 "tool_name": "fs_apply_patch",
                 "error": "no_change",
                 "detail": "Write produced no changes.",
             }
+        if (not append_mode) and (not explicit_replace_intent):
+            _emit_intent_validator_result(
+                intent="full_replace",
+                reason="existing_file_replace_requires_explicit_intent",
+            )
+            return None, {
+                "status": "blocked",
+                "error": "existing_file_replace_requires_explicit_intent",
+                "detail": "Existing-file Write(replace) requires explicit replace intent.",
+            }
 
-    patch = _build_unified_patch(old_text=old_text, new_text=content, rel_path=rel_path)
+    new_text = content
+    if append_mode and exists:
+        separator = ""
+        if old_text and content and (not old_text.endswith("\n")):
+            separator = "\n"
+        new_text = f"{old_text}{separator}{content}"
+
+    safety_intent = "append" if append_mode else "full_replace"
+    ok, reason = _validate_patch_safety(old_text=old_text, new_text=new_text, intent=safety_intent)
+    if not ok:
+        _emit_intent_validator_result(intent=safety_intent, reason=str(reason or "unknown"))
+        return None, {
+            "status": "blocked",
+            "error": str(reason or "patch_safety_blocked"),
+            "detail": "Write safety validation rejected generated patch.",
+        }
+    _emit_intent_validator_result(intent=safety_intent)
+
+    patch = _build_unified_patch(old_text=old_text, new_text=new_text, rel_path=rel_path)
     if patch is None:
         return None, {
             "status": "noop",
@@ -1204,21 +1745,57 @@ def _prepare_write_patch(
     meta = {
         "source": "write_abi",
         "path": rel_path,
-        "new_contents": content,
+        "old_contents": old_text,
+        "new_contents": new_text,
         "existing_file": bool(exists),
+        "operation_kind": ("append" if append_mode else "full_replace"),
+        "selection_basis": ("eof" if append_mode else "full_file"),
+        "explicit_replace_intent": bool(explicit_replace_intent),
+        "write_mode": ("append" if append_mode else "replace"),
     }
     return {"arguments": prepared, "meta": meta}, None
 
 
 def _has_patch_intent(msg: str) -> bool:
     text = (msg or "").lower()
-    if re.search(r"\b(patch|edit|modify|update|change)\b", text):
+    # Explicit non-edit instructions should win.
+    if re.search(
+        r"\b(?:show|explain|example|sample|demonstrate)\b.*\b(?:do\s+not|don't|without)\s+\b(?:edit|modify|change|patch|write|apply)\b",
+        text,
+    ):
+        return False
+    if re.search(r"\b(?:do\s+not|don't|without)\s+\b(?:edit|modify|change|patch|write|apply)\b", text):
+        return False
+
+    if re.search(
+        r"\b(patch|edit|modify|update|change|add|remove|delete|fix|refactor|implement|rewrite|replace|insert|append|rename|move|extract)\b",
+        text,
+    ):
         return True
     if re.search(r"\b(create|write|append|overwrite)\b", text) and (
         "file" in text or bool(re.search(r"[A-Za-z0-9_.\-/]+\.[A-Za-z0-9_]+", text))
     ):
         return True
     return False
+
+
+def _has_append_bottom_intent(msg: str) -> bool:
+    text = (msg or "").lower()
+    if not text.strip():
+        return False
+    if re.search(r"\b(?:do\s+not|don't|without)\s+\bappend\b", text):
+        return False
+    has_append_verb = bool(re.search(r"\b(?:append|add|insert)\b", text))
+    has_bottom_loc = bool(
+        re.search(
+            r"\b(?:bottom|bottom\s+of(?:\s+the)?\s+file|end(?:\s+of(?:\s+the)?)?\s+file|end\s+of|at\s+end(?:\s+of)?|at\s+the\s+end(?:\s+of)?|to\s+end|to\s+the\s+end|eof)\b",
+            text,
+        )
+    )
+    has_file_ref = _has_explicit_file_target(text) or bool(re.search(r"\b(?:this|the)\s+file\b", text))
+    if "append" in text and has_file_ref:
+        return True
+    return has_append_verb and has_bottom_loc and has_file_ref
 
 
 def _is_patch_repeat_followup_intent(msg: str) -> bool:
@@ -1266,6 +1843,279 @@ def _is_file_create_intent(msg: str) -> bool:
     if _has_explicit_file_target(text):
         return True
     return False
+
+
+def _extract_first_fenced_code_block(text: str) -> str | None:
+    blocks = _extract_fenced_code_blocks(text)
+    if not blocks:
+        return None
+    return blocks[0]
+
+
+def _extract_fenced_code_blocks_with_lang(text: str) -> list[tuple[str, str]]:
+    raw = str(text or "")
+    if not raw.strip():
+        return []
+    out: list[tuple[str, str]] = []
+    # Support both triple backticks and triple tildes.
+    for m in re.finditer(r"(?P<fence>`{3,}|~{3,})(?P<lang>[^\n]*)\n(?P<body>.*?)(?P=fence)", raw, flags=re.DOTALL):
+        lang = str(m.group("lang") or "").strip().lower()
+        content = str(m.group("body") or "").strip("\n")
+        if content.strip():
+            out.append((lang, content))
+    return out
+
+
+def _extract_fenced_code_blocks(text: str) -> list[str]:
+    return [content for _lang, content in _extract_fenced_code_blocks_with_lang(text)]
+
+
+def _unfenced_code_extraction_enabled() -> bool:
+    return os.getenv("OPENVEGAS_UNFENCED_CODE_EXTRACTION", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _extract_unfenced_code_like_region_for_target(text: str, target: str) -> str | None:
+    raw = str(text or "")
+    if not raw.strip():
+        return None
+    ext = Path(str(target or "")).suffix.lower()
+    chunks = [chunk.strip("\n") for chunk in re.split(r"\n\s*\n", raw) if chunk.strip()]
+    if not chunks:
+        return None
+
+    def _is_python_like(chunk: str) -> bool:
+        py_signals = (
+            r"^\s*def\s+\w+\s*\(",
+            r"^\s*class\s+\w+\s*:",
+            r"^\s*import\s+\w+",
+            r"^\s*from\s+\S+\s+import\s+",
+        )
+        return any(re.search(pat, chunk, flags=re.MULTILINE) for pat in py_signals)
+
+    ranked: list[tuple[int, int, int]] = []
+    for idx, chunk in enumerate(chunks):
+        lines = [ln for ln in chunk.splitlines() if ln.strip()]
+        if len(lines) < 5:
+            continue
+        score = 0
+        if re.search(r"^\s*(def|class|import|from|function|const|let|var)\b", chunk, flags=re.MULTILINE):
+            score += 2
+        if ext == ".py":
+            if not _is_python_like(chunk):
+                continue
+            score += 4
+        score += min(len(chunk) // 240, 3)
+        if score >= 5:
+            ranked.append((score, len(chunk), -idx))
+
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    best = ranked[0]
+    if len(ranked) > 1 and ranked[1][0] == best[0] and ranked[1][1] == best[1]:
+        return None
+    return chunks[-best[2]]
+
+
+def _read_observation_target_paths(tool_observations: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for obs in tool_observations:
+        if str(obs.get("tool_name")) != "fs_read":
+            continue
+        if str(obs.get("result_status")) != "succeeded":
+            continue
+        payload = obs.get("result_payload")
+        if not isinstance(payload, dict):
+            continue
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _normalize_path_like_token(path: str) -> str:
+    token = str(path or "").strip().replace("\\", "/")
+    while token.startswith("./"):
+        token = token[2:]
+    return token
+
+
+def _paths_match_for_target(observed: str, target: str) -> bool:
+    left = _normalize_path_like_token(observed)
+    right = _normalize_path_like_token(target)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if left.endswith("/" + right) or right.endswith("/" + left):
+        return True
+    return False
+
+
+def _latest_read_observation_payload_for_target(
+    tool_observations: list[dict[str, Any]],
+    target: str,
+) -> dict[str, Any] | None:
+    for obs in reversed(tool_observations):
+        if str(obs.get("tool_name")) != "fs_read":
+            continue
+        if str(obs.get("result_status")) != "succeeded":
+            continue
+        payload = obs.get("result_payload")
+        if not isinstance(payload, dict):
+            continue
+        obs_path = str(payload.get("path") or "").strip()
+        if not _paths_match_for_target(obs_path, target):
+            continue
+        return payload
+    return None
+
+
+def _derive_single_replace_from_old_and_new(old_text: str, new_text: str) -> tuple[str, str] | None:
+    if old_text == new_text:
+        return None
+    old_lines = old_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+    opcodes = difflib.SequenceMatcher(a=old_lines, b=new_lines).get_opcodes()
+    changed = [(tag, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in opcodes if tag != "equal"]
+    if len(changed) == 1:
+        _tag, i1, i2, j1, j2 = changed[0]
+        old_mid = "".join(old_lines[i1:i2])
+        new_mid = "".join(new_lines[j1:j2])
+        if not old_mid:
+            return None
+        if old_text.count(old_mid) != 1:
+            return None
+        return old_mid, new_mid
+
+    # Fallback: when structured diff decomposition is ambiguous, but we have
+    # a concrete full old snapshot from fs_read, an exact full-snapshot replace
+    # remains deterministic and fail-closed.
+    if old_text.strip() and old_text.count(old_text) == 1:
+        return old_text, new_text
+    return None
+
+
+def _lang_matches_target(lang: str, target: str) -> bool:
+    token = (lang or "").strip().lower()
+    ext = Path(str(target or "")).suffix.lower().lstrip(".")
+    if not token or not ext:
+        return False
+    aliases = {
+        "py": {"python", "py"},
+        "js": {"javascript", "js", "node"},
+        "ts": {"typescript", "ts"},
+        "tsx": {"tsx", "typescriptreact"},
+        "jsx": {"jsx", "javascriptreact"},
+        "md": {"markdown", "md"},
+        "json": {"json"},
+        "yaml": {"yaml", "yml"},
+        "yml": {"yaml", "yml"},
+        "sql": {"sql"},
+        "sh": {"bash", "shell", "sh", "zsh"},
+        "toml": {"toml"},
+        "go": {"go", "golang"},
+        "rs": {"rust", "rs"},
+    }
+    return token in aliases.get(ext, {ext})
+
+
+def _score_complete_file_block(content: str) -> int:
+    text = str(content or "")
+    score = max(0, len(text) // 200)
+    hints = (
+        r"^\s*import\s+",
+        r"^\s*from\s+\S+\s+import\s+",
+        r"^\s*def\s+\w+\s*\(",
+        r"^\s*class\s+\w+",
+        r"^\s*function\s+\w+\s*\(",
+        r"^\s*(const|let|var)\s+\w+\s*=",
+        r"^\s*export\s+",
+        r"^\s*#include\s+",
+        r"^\s*package\s+\w+",
+        r"^\s*public\s+class\s+",
+    )
+    for pat in hints:
+        if re.search(pat, text, flags=re.MULTILINE):
+            score += 2
+    return score
+
+
+def _select_synth_code_block(
+    *,
+    blocks: list[tuple[str, str]],
+    target: str | None,
+) -> tuple[str | None, str | None]:
+    if not blocks:
+        return None, "zero_code_blocks"
+    if len(blocks) == 1:
+        return blocks[0][1], None
+
+    if target:
+        matched = [content for lang, content in blocks if _lang_matches_target(lang, target)]
+        if len(matched) == 1:
+            return matched[0], None
+        if len(matched) > 1:
+            blocks = [(lang, content) for lang, content in blocks if _lang_matches_target(lang, target)]
+
+    ranked: list[tuple[int, int, int]] = []
+    for idx, (_lang, content) in enumerate(blocks):
+        ranked.append((_score_complete_file_block(content), len(content), -idx))
+    ranked.sort(reverse=True)
+    if not ranked:
+        return None, "multiple_code_blocks_ambiguous"
+    best = ranked[0]
+    # Require deterministic winner. If top two tie on score+length, fail closed.
+    if len(ranked) > 1 and ranked[1][0] == best[0] and ranked[1][1] == best[1]:
+        return None, "multiple_code_blocks_ambiguous"
+    chosen_index = -best[2]
+    return blocks[chosen_index][1], None
+
+
+def _should_synth_write_from_model_text(
+    *,
+    user_message: str,
+    model_text: str,
+    planner_edit_intent: bool,
+) -> bool:
+    targets = _path_hints_from_message(user_message)
+    if len(targets) > 1:
+        return False
+    code_blocks = _extract_fenced_code_blocks_with_lang(model_text)
+    content, _reason = _select_synth_code_block(
+        blocks=code_blocks,
+        target=(targets[0] if targets else None),
+    )
+    if not content:
+        return False
+    if not (_has_patch_intent(user_message) or planner_edit_intent):
+        return False
+    return True
+
+
+def _latest_read_observation_path(tool_observations: list[dict[str, Any]]) -> str | None:
+    for obs in reversed(tool_observations):
+        if str(obs.get("tool_name")) != "fs_read":
+            continue
+        if str(obs.get("result_status")) != "succeeded":
+            continue
+        payload = obs.get("result_payload")
+        if not isinstance(payload, dict):
+            continue
+        path = str(payload.get("path") or "").strip()
+        if path:
+            return path
+    return None
 
 
 def _extract_sections_from_message(msg: str) -> list[str]:
@@ -1317,6 +2167,101 @@ def _tool_debug_enabled() -> bool:
 def _tool_debug(message: str) -> None:
     if _tool_debug_enabled():
         console.print(f"[dim][tool-debug][/dim] {message}")
+
+
+def _ide_bridge_trace_enabled() -> bool:
+    return os.getenv("OPENVEGAS_IDE_BRIDGE_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ide_bridge_debug(message: str) -> None:
+    if _ide_bridge_trace_enabled():
+        console.print(f"[dim][ide-bridge][/dim] {message}")
+
+
+def _extension_is_ready() -> bool:
+    code_bin = shutil.which("code")
+    if not code_bin:
+        return True
+    ext_id = str(os.getenv("OPENVEGAS_VSCODE_DIFF_EXTENSION_ID", "")).strip().lower()
+    if not ext_id:
+        return True
+    try:
+        proc = subprocess.run(
+            [code_bin, "--list-extensions"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return False
+        installed = {ln.strip().lower() for ln in (proc.stdout or "").splitlines() if ln.strip()}
+        return ext_id in installed
+    except Exception:
+        return False
+
+
+def _run_extension_install() -> bool:
+    code_bin = shutil.which("code")
+    if not code_bin:
+        return False
+    target = str(
+        os.getenv("OPENVEGAS_VSCODE_DIFF_EXTENSION_INSTALL_TARGET", "")
+        or os.getenv("OPENVEGAS_VSCODE_DIFF_EXTENSION_ID", "")
+    ).strip()
+    if not target:
+        return False
+    try:
+        proc = subprocess.run(
+            [code_bin, "--install-extension", target, "--force"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _maybe_prompt_vscode_extension_for_interactive_diff() -> None:
+    global _VSCODE_DIFF_PROMPTED
+    if _VSCODE_DIFF_PROMPTED:
+        return
+    if os.getenv("OPENVEGAS_VSCODE_DIFF_EXTENSION_PROMPT", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return
+    if not sys.stdin.isatty():
+        return
+    if not shutil.which("code"):
+        return
+    cfg = load_config()
+    if bool(cfg.get("skip_vscode_extension_prompt")):
+        return
+    if _extension_is_ready():
+        return
+    _VSCODE_DIFF_PROMPTED = True
+    _drain_stdin_buffer(window_ms=0)
+    raw = Prompt.ask(
+        "Install OpenVegas VSCode interactive diff extension now? [Y/n/never]",
+        default="Y",
+    )
+    _drain_stdin_buffer(window_ms=0)
+    choice = str(raw or "").strip().lower()
+    if choice in {"", "y", "yes"}:
+        if not _run_extension_install():
+            _tool_debug("vscode extension install skipped/failed")
+        return
+    if choice in {"n", "no"}:
+        return
+    if choice == "never":
+        cfg["skip_vscode_extension_prompt"] = True
+        save_config(cfg)
+        return
+    # fail closed on unexpected input
+    return
 
 
 def _promote_tool_call_for_patch_intent(
@@ -1386,6 +2331,295 @@ def _synth_patch_tool_req_for_intent(
         "shell_mode": "mutating",
         "timeout_sec": 30,
     }
+
+
+def _comment_prefix_for_path(path: str) -> str:
+    suffix = Path(str(path or "")).suffix.lower()
+    if suffix in {".py", ".sh", ".yaml", ".yml", ".toml", ".ini", ".env", ".rb", ".pl", ".r"}:
+        return "#"
+    if suffix in {".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cc", ".cpp", ".h", ".hpp", ".go", ".rs", ".swift", ".kt"}:
+        return "//"
+    if suffix in {".sql"}:
+        return "--"
+    if suffix in {".html", ".xml", ".md"}:
+        return "<!--"
+    return "#"
+
+
+def _build_append_comment_from_intent(user_message: str, target: str) -> str | None:
+    text = str(user_message or "").strip()
+    lowered = text.lower()
+    if "comment" not in lowered:
+        return None
+    quoted: str | None = None
+    for pat in (r'"([^"\n]{1,200})"', r"'([^'\n]{1,200})'"):
+        m = re.search(pat, text)
+        if m:
+            quoted = m.group(1).strip()
+            break
+    comment_body = quoted or "Commentaire ajoute a la fin du fichier."
+    prefix = _comment_prefix_for_path(target)
+    if prefix == "<!--":
+        return f"<!-- {comment_body} -->\n"
+    return f"{prefix} {comment_body}\n"
+
+
+def _synth_write_tool_req_from_model_edit(
+    *,
+    user_message: str,
+    model_text: str,
+    tool_observations: list[dict[str, Any]],
+    planner_edit_intent: bool = False,
+) -> dict[str, Any] | None:
+    def _skip(reason: str) -> None:
+        emit_metric("tool_synth_write_skipped_total", {"reason": reason})
+        _tool_debug(f"synth-write skipped; reason={reason}")
+
+    if not (_has_patch_intent(user_message) or planner_edit_intent):
+        _skip("no_edit_intent")
+        return None
+
+    targets = _path_hints_from_message(user_message)
+    if len(targets) > 1:
+        _skip("multiple_targets")
+        return None
+
+    target = targets[0] if targets else None
+    if not target:
+        observed_targets = _read_observation_target_paths(tool_observations)
+        if len(observed_targets) > 1:
+            _skip("multiple_targets")
+            return None
+        if len(observed_targets) == 1:
+            target = observed_targets[0]
+            _tool_debug(f"synth-write target fallback from fs_read observation: {target}")
+
+    if not target:
+        _skip("zero_targets")
+        return None
+
+    for obs in tool_observations:
+        if str(obs.get("tool_name")) != "fs_apply_patch":
+            continue
+        # Suppress only after actual execution outcomes, not blocked/denied/noop.
+        status = str(obs.get("result_status") or "").strip().lower()
+        if status in {"succeeded", "failed"}:
+            _skip("suppressed_prior_patch_result")
+            return None
+
+    # For append-comment prompts, prefer deterministic intent-derived content
+    # over model-emitted full-file snippets to avoid replace-shaped fallbacks.
+    if _has_append_bottom_intent(user_message):
+        fallback_comment = _build_append_comment_from_intent(user_message, target)
+        if fallback_comment:
+            _tool_debug("synth-write used append-comment fallback from user intent (pre-codeblock)")
+            return {
+                "type": "tool_call",
+                "tool_name": "InsertAtEnd",
+                "arguments": {
+                    "filepath": target,
+                    "content": fallback_comment,
+                    "operation_kind": "append",
+                    "selection_basis": "eof",
+                },
+                "shell_mode": "mutating",
+                "timeout_sec": 30,
+            }
+
+    code_blocks = _extract_fenced_code_blocks_with_lang(model_text)
+    selected_content, selection_reason = _select_synth_code_block(
+        blocks=code_blocks,
+        target=target,
+    )
+    if not selected_content and _unfenced_code_extraction_enabled():
+        selected_content = _extract_unfenced_code_like_region_for_target(model_text, target)
+        if selected_content:
+            selection_reason = None
+            _tool_debug("synth-write used unfenced code extraction fallback")
+    if not selected_content:
+        if _has_append_bottom_intent(user_message):
+            fallback_comment = _build_append_comment_from_intent(user_message, target)
+            if fallback_comment:
+                _tool_debug("synth-write used append-comment fallback from user intent")
+                return {
+                    "type": "tool_call",
+                    "tool_name": "InsertAtEnd",
+                    "arguments": {
+                        "filepath": target,
+                        "content": fallback_comment,
+                        "operation_kind": "append",
+                        "selection_basis": "eof",
+                    },
+                    "shell_mode": "mutating",
+                    "timeout_sec": 30,
+                }
+        _skip(selection_reason or "content_missing")
+        return None
+
+    content = selected_content.strip("\n")
+    if len(content.strip()) < 3:
+        _skip("content_too_short")
+        return None
+
+    if _has_append_bottom_intent(user_message):
+        return {
+            "type": "tool_call",
+            "tool_name": "InsertAtEnd",
+            "arguments": {
+                "filepath": target,
+                "content": content,
+                "operation_kind": "append",
+                "selection_basis": "eof",
+            },
+            "shell_mode": "mutating",
+            "timeout_sec": 30,
+        }
+
+    payload = _latest_read_observation_payload_for_target(tool_observations, target)
+    current_text = str(payload.get("content") if isinstance(payload, dict) else "")
+    replace_pair = _derive_single_replace_from_old_and_new(current_text, content) if current_text else None
+    if replace_pair is not None:
+        old_string, new_string = replace_pair
+        return {
+            "type": "tool_call",
+            "tool_name": "FindAndReplace",
+            "arguments": {
+                "filepath": target,
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": False,
+                "operation_kind": "find_replace",
+                "selection_basis": "exact_string",
+            },
+            "shell_mode": "mutating",
+            "timeout_sec": 30,
+        }
+
+    if not _has_explicit_replace_wording(user_message):
+        _skip("existing_file_replace_requires_explicit_intent")
+        return None
+
+    return {
+        "type": "tool_call",
+        "tool_name": "Write",
+        "arguments": {
+            "filepath": target,
+            "content": content,
+            "write_mode": "replace",
+            "explicit_replace_intent": True,
+            "operation_kind": "full_replace",
+            "selection_basis": "full_file",
+        },
+        "shell_mode": "mutating",
+        "timeout_sec": 30,
+    }
+
+
+def _maybe_prepend_synth_write(
+    *,
+    tool_reqs: list[dict[str, Any]],
+    user_message: str,
+    model_text: str,
+    planner_edit_intent: bool,
+    tool_observations: list[dict[str, Any]],
+    reason_if_empty: str,
+    reason_if_non_mutating: str,
+    debug_label: str,
+    preprocess: Callable[[dict[str, Any]], tuple[dict[str, Any] | None, dict[str, Any] | None]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Prepend synthesized Write when edit intent exists and no mutating call remains."""
+    had_any_candidates = bool(tool_reqs)
+    has_mutating = any(_is_mutating_tool_candidate(req) for req in tool_reqs)
+    _tool_debug(
+        f"{debug_label}; had_any_candidates={had_any_candidates} "
+        f"has_mutating={has_mutating} planner_edit_intent={planner_edit_intent}"
+    )
+    if has_mutating:
+        return tool_reqs, [], False
+
+    write_fallback = _synth_write_tool_req_from_model_edit(
+        user_message=user_message,
+        model_text=model_text,
+        tool_observations=tool_observations,
+        planner_edit_intent=planner_edit_intent,
+    )
+    if write_fallback is None:
+        return tool_reqs, [], False
+
+    synth_req: dict[str, Any] | None = write_fallback
+    synth_errors: list[dict[str, Any]] = []
+    if preprocess is not None:
+        prepared, prep_error = preprocess(write_fallback)
+        if prep_error is not None:
+            synth_errors.append(prep_error)
+            prep_reason = str(prep_error.get("error") or "preprocess_rejected")
+            emit_metric("tool_synth_write_blocked_total", {"reason": prep_reason})
+            emit_metric("preprocess_rejected_synth_write", {"reason": prep_reason})
+        if prepared is None:
+            return tool_reqs, synth_errors, False
+        synth_req = prepared
+
+    reason = reason_if_non_mutating if had_any_candidates else reason_if_empty
+    out = list(tool_reqs)
+    out.insert(0, synth_req)
+    emit_metric("tool_synth_write_from_code_block_total", {"reason": reason})
+    _tool_debug(f"{debug_label}; reason={reason}")
+    return out, synth_errors, True
+
+
+def _diagnose_synth_write_skip_reason(
+    *,
+    user_message: str,
+    model_text: str,
+    tool_observations: list[dict[str, Any]],
+    planner_edit_intent: bool,
+) -> str | None:
+    if not (_has_patch_intent(user_message) or planner_edit_intent):
+        return "no_edit_intent"
+    targets = _path_hints_from_message(user_message)
+    if len(targets) > 1:
+        return "multiple_targets"
+    target = targets[0] if targets else None
+    if not target:
+        observed_targets = _read_observation_target_paths(tool_observations)
+        if len(observed_targets) > 1:
+            return "multiple_targets"
+        if len(observed_targets) == 1:
+            target = observed_targets[0]
+    if not target:
+        return "zero_targets"
+    for obs in tool_observations:
+        if str(obs.get("tool_name")) != "fs_apply_patch":
+            continue
+        status = str(obs.get("result_status") or "").strip().lower()
+        if status in {"succeeded", "failed"}:
+            return "suppressed_prior_patch_result"
+    if _has_append_bottom_intent(user_message):
+        fallback_comment = _build_append_comment_from_intent(user_message, target)
+        if fallback_comment:
+            return None
+    content, reason = _select_synth_code_block(
+        blocks=_extract_fenced_code_blocks_with_lang(model_text),
+        target=target,
+    )
+    if not content and _unfenced_code_extraction_enabled():
+        content = _extract_unfenced_code_like_region_for_target(model_text, target)
+        if content:
+            reason = None
+    if not content:
+        return reason or "content_missing"
+    if len(content.strip()) < 3:
+        return "content_too_short"
+    if _has_append_bottom_intent(user_message):
+        return None
+    if target:
+        payload = _latest_read_observation_payload_for_target(tool_observations, target)
+        current_text = str(payload.get("content") if isinstance(payload, dict) else "")
+        if current_text and _derive_single_replace_from_old_and_new(current_text, content) is not None:
+            return None
+    if not _has_explicit_replace_wording(user_message):
+        return "existing_file_replace_requires_explicit_intent"
+    return None
 
 
 def _deep_find_keyed_string(v: Any, keys: tuple[str, ...], depth: int = 0) -> str | None:
@@ -1483,6 +2717,18 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
     if isinstance(fallback_req, dict):
         candidates.append(fallback_req)
     return candidates
+
+
+def _is_mutating_tool_candidate(tool_req: dict[str, Any]) -> bool:
+    raw = str(tool_req.get("tool_name", "")).strip()
+    canonical = _canonical_tool_name(raw)
+    lowered = raw.lower()
+    if canonical == "fs_apply_patch" or lowered in {"write", "write_file", "file_write"}:
+        return True
+    if canonical == "shell_run":
+        mode = str(tool_req.get("shell_mode", "read_only")).strip().lower()
+        return mode in {"mutating", "exec"}
+    return False
 
 
 def _semantic_tool_signature(tool_name: str, arguments: dict[str, Any], shell_mode: str | None) -> str:
@@ -1593,8 +2839,29 @@ def _preprocess_tool_request_for_runtime(
             "detail": f"Unsupported tool `{tool_name_raw}`; use one of {sorted(SUPPORTED_TOOL_NAMES)}.",
         }
 
+    raw_tool_token = str(tool_name_raw or "").strip().lower().replace("-", "_")
+    find_replace_like_request = (
+        raw_tool_token in FIND_REPLACE_TOOL_TOKENS
+        or (
+            tool_name == "fs_apply_patch"
+            and _coerce_nonempty_text(arguments.get("filepath")) is not None
+            and isinstance(arguments.get("old_string"), str)
+            and isinstance(arguments.get("new_string"), str)
+            and _coerce_nonempty_text(arguments.get("patch")) is None
+        )
+    )
+    insert_at_end_like_request = (
+        raw_tool_token in INSERT_AT_END_TOOL_TOKENS
+        or (
+            tool_name == "fs_apply_patch"
+            and str(arguments.get("operation_kind") or "").strip().lower() == "append"
+            and _coerce_nonempty_text(arguments.get("filepath")) is not None
+            and isinstance(arguments.get("content"), str)
+            and _coerce_nonempty_text(arguments.get("patch")) is None
+        )
+    )
     write_like_request = (
-        str(tool_name_raw or "").strip().lower() in {"write", "write_file", "file_write"}
+        raw_tool_token in {"write", "write_file", "file_write"}
         or (
             tool_name == "fs_apply_patch"
             and _coerce_nonempty_text(arguments.get("filepath")) is not None
@@ -1603,11 +2870,49 @@ def _preprocess_tool_request_for_runtime(
                 or isinstance(arguments.get("new_content"), str)
             )
             and _coerce_nonempty_text(arguments.get("patch")) is None
+            and not find_replace_like_request
+            and not insert_at_end_like_request
         )
     )
 
-    if write_like_request:
-        write_prepared, write_err = _prepare_write_patch(workspace_root=workspace_root, arguments=arguments)
+    if find_replace_like_request:
+        write_prepared, write_err = _prepare_find_replace_patch(
+            workspace_root=workspace_root,
+            arguments=arguments,
+        )
+        if write_err is not None:
+            err = {
+                "tool_name": tool_name,
+                "status": write_err.get("status", "blocked"),
+                "error": write_err.get("error", "invalid_tool_arguments"),
+                "detail": write_err.get("detail", "FindAndReplace preprocessing failed."),
+            }
+            return None, err
+        assert write_prepared is not None
+        arguments = dict(write_prepared["arguments"])
+        write_meta = dict(write_prepared["meta"])
+    elif insert_at_end_like_request:
+        write_prepared, write_err = _prepare_insert_at_end_patch(
+            workspace_root=workspace_root,
+            arguments=arguments,
+        )
+        if write_err is not None:
+            err = {
+                "tool_name": tool_name,
+                "status": write_err.get("status", "blocked"),
+                "error": write_err.get("error", "invalid_tool_arguments"),
+                "detail": write_err.get("detail", "InsertAtEnd preprocessing failed."),
+            }
+            return None, err
+        assert write_prepared is not None
+        arguments = dict(write_prepared["arguments"])
+        write_meta = dict(write_prepared["meta"])
+    elif write_like_request:
+        write_prepared, write_err = _prepare_write_patch(
+            workspace_root=workspace_root,
+            arguments=arguments,
+            user_message=user_message,
+        )
         if write_err is not None:
             err = {
                 "tool_name": tool_name,
@@ -1867,7 +3172,7 @@ def history():
         from openvegas.client import OpenVegasClient, APIError
         try:
             client = OpenVegasClient()
-            data = await client.get_history()
+            data = await client.get_billing_activity()
             entries = data.get("entries", [])
             if not entries:
                 console.print("[dim]No transactions yet.[/dim]")
@@ -1877,13 +3182,27 @@ def history():
             table.add_column("Time", style="dim")
             table.add_column("Type")
             table.add_column("Amount", justify="right")
+            table.add_column("Status")
             table.add_column("Reference")
 
             for entry in entries[:20]:
+                kind = str(entry.get("type", "top_up"))
+                if kind == "gameplay":
+                    vv = str(entry.get("amount_v_2dp") or entry.get("amount_v") or "0.00")
+                    try:
+                        vnum = Decimal(vv)
+                        amount = f"{'+' if vnum > 0 else ''}{vnum.quantize(Decimal('0.01'))} $V"
+                    except Exception:
+                        amount = f"{vv} $V"
+                else:
+                    usd = str(entry.get("amount_usd") or "0.00")
+                    vv = str(entry.get("amount_v_2dp") or entry.get("amount_v") or "0.00")
+                    amount = f"${usd} · +{vv} $V"
                 table.add_row(
-                    entry.get("created_at", "")[:19],
-                    entry.get("entry_type", ""),
-                    entry.get("amount", ""),
+                    str(entry.get("time", ""))[:19].replace("T", " "),
+                    kind,
+                    amount,
+                    str(entry.get("status", "")),
                     entry.get("reference_id", "")[:20],
                 )
             console.print(table)
@@ -1907,11 +3226,41 @@ def deposit(amount: str):
 
         try:
             client = OpenVegasClient()
+            preview = await client.preview_topup_checkout(amt)
+            console.print(
+                "[bold]Preview:[/bold] "
+                f"gross={preview.get('v_credit_gross')} $V, "
+                f"repay={preview.get('repay_v')} $V, "
+                f"net={preview.get('net_credit_v')} $V"
+            )
+            console.print(
+                "[dim]Final repayment is computed at settlement and may differ "
+                "if outstanding principal changes before payment completion.[/dim]"
+            )
+            if not click.confirm("Proceed to create checkout?", default=True):
+                console.print("[yellow]Checkout cancelled.[/yellow]")
+                return
             data = await client.create_topup_checkout(amt)
             console.print(f"[green]Top-up ID:[/green] {data.get('topup_id')}")
             console.print(f"[green]Status:[/green] {data.get('status')}")
-            if data.get("checkout_url"):
-                console.print(f"[bold cyan]Checkout URL:[/bold cyan] {data['checkout_url']}")
+            checkout_url = str(data.get("checkout_url") or "")
+            if checkout_url:
+                target_url = checkout_url
+                if _is_simulated_checkout_url(checkout_url):
+                    target_url = f"{str(client.base_url).rstrip('/')}/ui/payments"
+                    console.print(
+                        "[yellow]Backend returned simulated checkout URL. "
+                        "Opening payments UI instead.[/yellow]"
+                    )
+                console.print(f"[bold cyan]Checkout URL:[/bold cyan] {checkout_url}")
+                try:
+                    opened = webbrowser.open(target_url, new=2)
+                except Exception:
+                    opened = False
+                if opened:
+                    console.print(f"[green]Opened in browser:[/green] {target_url}")
+                else:
+                    console.print(f"[yellow]Could not auto-open browser. Open manually:[/yellow] {target_url}")
             else:
                 console.print("[yellow]No checkout URL returned. Try again or check deposit status.[/yellow]")
         except APIError as e:
@@ -2057,23 +3406,18 @@ def keys_list():
     type=click.Choice(["win", "place", "show"]), default="win",
 )
 @click.option("--render/--no-render", default=True, help="Render terminal animation/reveal when available")
-@click.option(
-    "--demo-force-win/--no-demo-force-win",
-    default=False,
-    help="Use admin-only demo win endpoint (non-canonical).",
-)
 def play(
     game: str,
     stake: float,
     horse: int,
     bet_type: str,
     render: bool,
-    demo_force_win: bool,
 ):
     """Play a game and wager $V."""
     async def _play():
         import json
         import uuid
+        from openvegas.casino.constants import min_game_wager_v
         from openvegas.client import OpenVegasClient, APIError
         from openvegas.games.base import GameResult
         from openvegas.games.horse_racing import HorseRacing
@@ -2081,6 +3425,18 @@ def play(
 
         try:
             client = OpenVegasClient()
+            balance_before_text = ""
+            try:
+                bal = await client.get_balance()
+                bal_v = Decimal(str(bal.get("balance", "0")))
+                balance_before_text = f"[dim]Balance before play: {bal_v.quantize(Decimal('0.01'))} $V[/dim]"
+            except Exception:
+                balance_before_text = ""
+
+            min_wager = float(min_game_wager_v())
+            if stake < min_wager:
+                console.print(f"[red]Stake must be at least {min_wager:.2f} $V.[/red]")
+                return
 
             if game == "horse":
                 if stake <= 0:
@@ -2166,11 +3522,11 @@ def play(
                     quote_id=str(quote.get("quote_id", "")),
                     horse=int(horse_choice),
                     idempotency_key=f"cli-horse-play-{uuid.uuid4()}",
-                    demo_mode=demo_force_win,
+                    demo_mode=False,
                 )
             else:
                 bet = {"amount": stake, "type": bet_type}
-                result = await client.play_game_demo(game, bet) if demo_force_win else await client.play_game(game, bet)
+                result = await client.play_game(game, bet)
 
             net = Decimal(str(result.get("net", "0")))
             payout = Decimal(str(result.get("payout", "0")))
@@ -2204,13 +3560,10 @@ def play(
             else:
                 result_lines.append(f"[red]Lost {bet_amount} $V.[/red]")
 
-            if result.get("demo_mode"):
-                result_lines.append("[bold yellow]DEMO MODE RESULT[/bold yellow] [dim](canonical: false)[/dim]")
-
-            if result.get("demo_mode"):
-                result_lines.append(f"[dim]Verify (demo): {verify_hint_for_result(game_id, True)}[/dim]")
-            elif result.get("provably_fair"):
+            if result.get("provably_fair"):
                 result_lines.append(f"[dim]Verify: {verify_hint_for_result(game_id, False)}[/dim]")
+            if balance_before_text:
+                result_lines.append(balance_before_text)
 
             render_result_panel(
                 console,
@@ -2246,6 +3599,8 @@ def ask(prompt: str, provider: str | None, model: str | None):
     """Use $V for AI inference."""
     from openvegas.config import get_default_provider, get_default_model
 
+    _load_openvegas_env_defaults_from_dotenv()
+
     if provider is None:
         provider = get_default_provider()
     if model is None:
@@ -2267,12 +3622,59 @@ def ask(prompt: str, provider: str | None, model: str | None):
     run_async(_ask())
 
 
+def _resolve_default_dealer_sprite_path(workspace_root: str) -> Path:
+    env_path = str(os.getenv("OPENVEGAS_DEALER_SPRITE_PATH", "")).strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    candidates = [
+        Path(workspace_root) / "ui" / "assets" / "sprites" / "dealers" / "ov_dealer_female_tux_v1.png",
+        Path(__file__).resolve().parents[1] / "ui" / "assets" / "sprites" / "dealers" / "ov_dealer_female_tux_v1.png",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _build_cli_sprite_renderer(*, dealer_sprite: bool, workspace_root: str):
+    if not dealer_sprite:
+        return None
+    try:
+        from openvegas.tui.sprite_render import TerminalSpriteRenderer
+    except Exception:
+        emit_metric("avatar_sprite_render_fail_total", {"surface": "cli", "reason": "renderer_import_failed"})
+        return None
+
+    sprite_path = _resolve_default_dealer_sprite_path(workspace_root)
+    renderer = TerminalSpriteRenderer(sprite_path)
+    if not renderer.enabled():
+        emit_metric(
+            "avatar_sprite_render_fail_total",
+            {"surface": "cli", "reason": str(getattr(renderer, "reason", "") or "renderer_disabled")},
+        )
+        console.print(
+            "[dim]Dealer sprite unavailable "
+            f"(reason={getattr(renderer, 'reason', 'unknown')}). "
+            "Using unicode fallback.[/dim]"
+        )
+        return None
+    console.print(f"[dim]Dealer sprite enabled: {renderer.path}[/dim]")
+    return renderer
+
+
 @cli.command()
 @click.option("--provider", default=None, help="Provider (openai/anthropic/gemini)")
 @click.option("--model", default=None, help="Model ID")
-def chat(provider: str | None, model: str | None):
+@click.option(
+    "--dealer-sprite/--no-dealer-sprite",
+    default=False,
+    help="Enable truecolor dealer sprite rendering (defaults to emoji/unicode style).",
+)
+def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     """OpenVegas conversational shell with slash commands and /ui handoff."""
     from openvegas.config import get_default_provider, get_default_model
+
+    _load_openvegas_env_defaults_from_dotenv()
 
     current_provider = provider or get_default_provider()
     current_model = model or get_default_model(current_provider)
@@ -2288,17 +3690,57 @@ def chat(provider: str | None, model: str | None):
     approval_mode = "ask"
     conversation_mode = "persistent"
     last_successful_tool: str | None = None
+    def _env_flag(name: str, default: str = "0") -> bool:
+        return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+    show_model_meta = _env_flag("OPENVEGAS_CHAT_SHOW_MODEL_META", "0")
+    allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "0")
+    preferred_openai_models = [
+        "gpt-5.4",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-5.3-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex",
+        "gpt-5.1-codex-mini",
+    ]
+
+    def _status_actor() -> str:
+        return f"{current_provider}/{current_model}" if show_model_meta else "openvegas"
+
+    def _pick_preferred_model(enabled_models: list[str], current: str) -> str:
+        enabled = [str(m or "").strip() for m in enabled_models if str(m or "").strip()]
+        if not enabled:
+            return current
+        if current in enabled and ("codex" in current.lower() or current in preferred_openai_models):
+            return current
+        enabled_lc = {m.lower(): m for m in enabled}
+        for preferred in preferred_openai_models:
+            chosen = enabled_lc.get(preferred.lower())
+            if chosen:
+                return chosen
+        return enabled[0]
+
     cfg = load_config()
     verbose_tool_events = normalize_tool_event_density(str(cfg.get("tool_event_density", "compact"))) == "verbose"
     _ = cfg.get("chat_style", "codex")  # retained for backward compatibility only
     _ = cfg.get("approval_ui", "menu")  # retained for backward compatibility only
     session_approval = SessionApprovalState()
+    dealer_enabled = str(os.getenv("OPENVEGAS_CLI_DEALER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    cli_sprite_renderer = _build_cli_sprite_renderer(dealer_sprite=bool(dealer_sprite), workspace_root=workspace_root)
+    dealer_panel = DealerPanel(
+        console=console,
+        enabled=dealer_enabled,
+        label="openvegas",
+        sprite_renderer=cli_sprite_renderer,
+    )
 
     def _show_help() -> None:
         console.print("Chat Commands:")
         console.print("/help - show commands")
-        console.print("/provider <openai|anthropic|gemini> [model] - switch provider")
-        console.print("/model <model_id> - switch model")
+        if allow_model_switch:
+            console.print("/provider <openai|anthropic|gemini> [model] - switch provider")
+            console.print("/model <model_id> - switch model")
         console.print("/plan [on|off] - toggle plan mode (read-only intent)")
         console.print("/approve <ask|allow|exclude> - mutating tool approval mode")
         console.print("/style - deprecated (minimal style is always on)")
@@ -2336,7 +3778,9 @@ def chat(provider: str | None, model: str | None):
             "Available tools:\n"
             "  - Read({ filepath })\n"
             "  - Search({ pattern, path? })\n"
-            "  - Write({ filepath, content })\n"
+            "  - FindAndReplace({ filepath, old_string, new_string, replace_all? })\n"
+            "  - InsertAtEnd({ filepath, content })\n"
+            "  - Write({ filepath, content, write_mode? })\n"
             "  - Bash({ command })\n"
             "  - List({ path? })\n"
             "Rules:\n"
@@ -2346,6 +3790,7 @@ def chat(provider: str | None, model: str | None):
             "3) Do not claim you cannot access files; tools are available through this runtime.\n"
             "4) Use mutating tools only when required.\n"
             "5) Never repeat the exact same tool call (same tool + same args) after it succeeded; use prior observations to answer.\n\n"
+            "5b) For file mutations, prefer FindAndReplace and InsertAtEnd; only use Write(replace) when explicit full-file replacement is intended.\n\n"
             "6) For requests like 'apply a tiny patch to a temp file', do not ask for clarification.\n"
             "   Choose a safe workspace-local temp file path and produce a minimal valid unified diff.\n\n"
             f"Prior tool observations (JSON): {obs_json}\n\n"
@@ -2361,9 +3806,8 @@ def chat(provider: str | None, model: str | None):
 
         from openvegas.client import APIError
 
-        async def _force_finalize(observations: list[dict[str, Any]], *, reason: str = "completed") -> bool:
+        async def _request_final_response(observations: list[dict[str, Any]]) -> dict[str, Any]:
             nonlocal current_thread_id
-            emit_metric("tool_loop_finalize_reason", {"reason": str(reason or "completed")})
             compression_hint = ""
             if streamed_tools_seen.get("shell_run"):
                 compression_hint = (
@@ -2389,17 +3833,21 @@ def chat(provider: str | None, model: str | None):
             next_thread = final_res.get("thread_id")
             if next_thread:
                 current_thread_id = str(next_thread)
+            return final_res
+
+        async def _force_finalize(final_res: dict[str, Any], *, reason: str = "completed") -> bool:
+            emit_metric("tool_loop_finalize_reason", {"reason": str(reason or "completed")})
+            dealer_panel.render(map_lifecycle_event_to_state("finalize"), "finalized")
             final_text = str(final_res.get("text", "")).strip()
             if final_text:
                 render_assistant(console, final_text)
                 render_status_bar(
                     console,
-                    f"{current_provider}/{current_model}",
+                    _status_actor(),
                     f"cost {final_res.get('v_cost', '?')} $V",
                     workspace_root,
                 )
-                return True
-            return False
+            return True
 
         async def _execute_with_heartbeat(
             *,
@@ -2469,7 +3917,13 @@ def chat(provider: str | None, model: str | None):
         tool_observations: list[dict[str, Any]] = []
         executed_tool_calls: dict[str, int] = {}
         streamed_tools_seen: dict[str, bool] = {}
-        completion_criteria = _build_completion_criteria(user_message)
+        completion_force_patch_intent = bool(
+            last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
+        )
+        completion_criteria = _build_completion_criteria(
+            user_message,
+            planner_edit_intent=completion_force_patch_intent,
+        )
         pending_retry_tool_req: dict[str, Any] | None = None
         bridge_caps: dict[str, bool] = {"connected": False, "show_diff": False}
         active_mutation_timeout_hit = False
@@ -2477,7 +3931,13 @@ def chat(provider: str | None, model: str | None):
         progress_fingerprint_prev: str | None = None
         unchanged_progress_iters = 0
         repeated_patch_failures: dict[str, int] = {}
+        successful_append_payload_fingerprints: set[str] = set()
         stall_limit_iters = max(2, int(os.getenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "4")))
+        mutation_not_observed_limit = max(
+            1,
+            int(os.getenv("OPENVEGAS_MUTATION_NOT_OBSERVED_LIMIT_ITERS", "2")),
+        )
+        mutation_not_observed_iters = 0
         max_active_mutation_wait_sec = max(1.0, float(os.getenv("OPENVEGAS_ACTIVE_MUTATION_TIMEOUT_SEC", "10")))
         patch_failure_repeat_limit = max(2, int(os.getenv("OPENVEGAS_PATCH_FAILURE_REPEAT_LIMIT", "2")))
 
@@ -2521,6 +3981,143 @@ def chat(provider: str | None, model: str | None):
         def _completion_eval() -> CompletionEvaluation:
             return _evaluate_completion_criteria(completion_criteria, workspace_root)
 
+        def _mutation_observed_for_completion() -> bool:
+            if not completion_criteria.requires_mutation:
+                return True
+            required = {
+                str(token).strip().replace("\\", "/")
+                for token in completion_criteria.required_files
+                if str(token).strip()
+            }
+            required_names = {Path(token).name for token in required}
+            for obs in reversed(tool_observations):
+                if str(obs.get("tool_name")) != "fs_apply_patch":
+                    continue
+                result_status = str(obs.get("result_status") or "").strip().lower()
+                obs_status = str(obs.get("status") or "").strip().lower()
+                if result_status != "succeeded" and obs_status != "noop":
+                    continue
+                payload = obs.get("result_payload")
+                if not isinstance(payload, dict):
+                    return True
+                targets = payload.get("files_targeted")
+                if not isinstance(targets, list) or not targets:
+                    return True
+                touched = {str(t).strip().replace("\\", "/") for t in targets if str(t).strip()}
+                if not required:
+                    return True
+                if touched & required:
+                    return True
+                touched_names = {Path(t).name for t in touched}
+                if touched_names & required_names:
+                    return True
+            return False
+
+        def _latest_blocked_edit_reason() -> str | None:
+            for obs in reversed(tool_observations):
+                if str(obs.get("status")) != "blocked":
+                    continue
+                detail = str(obs.get("detail") or "").strip()
+                if not detail:
+                    continue
+                if detail.startswith("edit blocked:"):
+                    return detail
+                if str(obs.get("error")) in {
+                    "user_declined_edit",
+                    "mutation_required_but_unavailable",
+                    "post_finalize_intercept_skip",
+                }:
+                    return detail
+            return None
+
+        post_finalize_intercept_attempted = False
+
+        def _record_post_finalize_skip(reason: str) -> tuple[bool, str]:
+            _tool_debug(f"post-finalize intercept skipped; reason={reason}")
+            tool_observations.append(
+                {
+                    "status": "blocked",
+                    "error": "post_finalize_intercept_skip",
+                    "detail": reason,
+                }
+            )
+            return False, reason
+
+        async def _maybe_intercept_final_text_for_mutation(
+            *,
+            final_text: str,
+            edit_intent: bool,
+        ) -> tuple[bool, str | None]:
+            nonlocal pending_retry_tool_req, post_finalize_intercept_attempted
+
+            if post_finalize_intercept_attempted:
+                prior_reason = _latest_blocked_edit_reason()
+                if prior_reason:
+                    return _record_post_finalize_skip(prior_reason)
+                return _record_post_finalize_skip("post_finalize_intercept_already_attempted")
+            post_finalize_intercept_attempted = True
+
+            if not completion_criteria.requires_mutation:
+                return _record_post_finalize_skip("mutation_not_required")
+            if _mutation_observed_for_completion():
+                return _record_post_finalize_skip("mutation_already_observed")
+
+            write_fallback = _synth_write_tool_req_from_model_edit(
+                user_message=user_message,
+                model_text=final_text,
+                tool_observations=tool_observations,
+                planner_edit_intent=edit_intent,
+            )
+            if write_fallback is None:
+                reason = _diagnose_synth_write_skip_reason(
+                    user_message=user_message,
+                    model_text=final_text,
+                    tool_observations=tool_observations,
+                    planner_edit_intent=edit_intent,
+                ) or "final_text_code_block_intercept_failed"
+                emit_metric("tool_mutation_blocked_total", {"reason": reason})
+                return _record_post_finalize_skip(reason)
+
+            pending_retry_tool_req = write_fallback
+            emit_metric("tool_synth_write_from_code_block_total", {"reason": "post_finalize_interception"})
+            _tool_debug("post-finalize interception queued synthesized Write")
+            return True, None
+
+        async def _finalize_or_continue_with_intercept(
+            *,
+            reason: str,
+            edit_intent: bool,
+        ) -> bool:
+            final_res = await _request_final_response(tool_observations)
+            final_text = str(final_res.get("text", "")).strip()
+            intercepted, blocked_reason = await _maybe_intercept_final_text_for_mutation(
+                final_text=final_text,
+                edit_intent=edit_intent,
+            )
+            if intercepted:
+                return False
+            if blocked_reason and completion_criteria.requires_mutation and not _mutation_observed_for_completion():
+                emit_metric(
+                    "tool_loop_finalize_reason",
+                    {"reason": "mutation_required_but_unavailable"},
+                )
+                tool_observations.append(
+                    {
+                        "status": "blocked",
+                        "error": "mutation_required_but_unavailable",
+                        "detail": blocked_reason,
+                    }
+                )
+                render_assistant(console, f"edit blocked: {blocked_reason}")
+                render_status_bar(
+                    console,
+                    f"{current_provider}/{current_model}",
+                    f"cost {final_res.get('v_cost', '?')} $V",
+                    workspace_root,
+                )
+                return True
+            return await _force_finalize(final_res, reason=reason)
+
         def _progress_fingerprint(eval_result: CompletionEvaluation) -> str:
             latest = tool_observations[-1] if tool_observations else {}
             payload = {
@@ -2529,6 +4126,7 @@ def chat(provider: str | None, model: str | None):
                 "error": str(latest.get("error", "")),
                 "result_status": str(latest.get("result_status", "")),
                 "artifact_fingerprint": eval_result.fingerprint,
+                "mutation_observed": _mutation_observed_for_completion(),
             }
             return _sha256_hex(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
@@ -2536,13 +4134,48 @@ def chat(provider: str | None, model: str | None):
             *,
             reason_if_finalize: str,
             step: int,
+            edit_intent: bool,
         ) -> bool:
-            nonlocal progress_fingerprint_prev, unchanged_progress_iters
+            nonlocal progress_fingerprint_prev, unchanged_progress_iters, mutation_not_observed_iters
             if not completion_criteria.active:
-                return await _force_finalize(tool_observations, reason=reason_if_finalize)
+                return await _finalize_or_continue_with_intercept(
+                    reason=reason_if_finalize,
+                    edit_intent=edit_intent,
+                )
             eval_result = _completion_eval()
-            if eval_result.satisfied:
-                return await _force_finalize(tool_observations, reason=reason_if_finalize)
+            mutation_observed = _mutation_observed_for_completion()
+            if eval_result.satisfied and mutation_observed:
+                mutation_not_observed_iters = 0
+                return await _finalize_or_continue_with_intercept(
+                    reason=reason_if_finalize,
+                    edit_intent=edit_intent,
+                )
+            missing = list(eval_result.missing)
+            if eval_result.satisfied and completion_criteria.requires_mutation and not mutation_observed:
+                missing.append("mutation_not_observed")
+                emit_metric("mutation_required_stall_total", {"reason": "mutation_not_observed"})
+                mutation_not_observed_iters += 1
+                _tool_debug("completion satisfied by artifacts but mutation not observed; continuing tool loop")
+                if mutation_not_observed_iters >= mutation_not_observed_limit:
+                    emit_metric(
+                        "mutation_required_stall_total",
+                        {"reason": "mutation_not_observed_retry_limit"},
+                    )
+                    tool_observations.append(
+                        {
+                            "status": "blocked",
+                            "error": "mutation_not_observed_retry_limit",
+                            "detail": (
+                                "Completion artifacts satisfied but no mutation was observed after repeated attempts."
+                            ),
+                        }
+                    )
+                    return await _finalize_or_continue_with_intercept(
+                        reason="mutation_not_observed_retry_limit",
+                        edit_intent=edit_intent,
+                    )
+            else:
+                mutation_not_observed_iters = 0
             fp = _progress_fingerprint(eval_result)
             if progress_fingerprint_prev is not None and fp == progress_fingerprint_prev:
                 unchanged_progress_iters += 1
@@ -2553,13 +4186,19 @@ def chat(provider: str | None, model: str | None):
                 {
                     "status": "blocked",
                     "error": "completion_criteria_unmet",
-                    "detail": ", ".join(eval_result.missing[:6]),
+                    "detail": ", ".join(missing[:6]),
                 }
             )
             if unchanged_progress_iters >= stall_limit_iters:
-                return await _force_finalize(tool_observations, reason="workflow_stalled_no_new_observations")
+                return await _finalize_or_continue_with_intercept(
+                    reason="workflow_stalled_no_new_observations",
+                    edit_intent=edit_intent,
+                )
             if step >= (max_tool_steps - 1):
-                return await _force_finalize(tool_observations, reason="completion_criteria_unmet_after_retries")
+                return await _finalize_or_continue_with_intercept(
+                    reason="completion_criteria_unmet_after_retries",
+                    edit_intent=edit_intent,
+                )
             return False
 
         async def _call_with_stale_retry(factory, *, endpoint: str):
@@ -2595,7 +4234,6 @@ def chat(provider: str | None, model: str | None):
         for step in range(max_tool_steps):
             cleaned_text = ""
             model_text = ""
-            injected_temp_patch = False
             candidate_tool_calls: list[dict[str, Any]] = []
             if pending_retry_tool_req is not None:
                 candidate_tool_calls = [pending_retry_tool_req]
@@ -2603,23 +4241,24 @@ def chat(provider: str | None, model: str | None):
             force_patch_intent = bool(
                 last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
             )
-            if force_patch_intent:
+            planner_edit_intent = force_patch_intent
+            edit_intent = _has_patch_intent(user_message) or planner_edit_intent
+            if planner_edit_intent:
                 _tool_debug(f"forcing patch follow-up intent from prior tool={last_successful_tool!r}")
 
             if (
                 step == 0
                 and not candidate_tool_calls
                 and not tool_observations
-                and (force_patch_intent or _is_patch_smoke_intent(user_message))
+                and (planner_edit_intent or _is_patch_smoke_intent(user_message))
             ):
                 synthetic = _synth_patch_tool_req_for_intent(
                     user_message=user_message,
                     tool_observations=tool_observations,
-                    force_patch_intent=force_patch_intent,
+                    force_patch_intent=planner_edit_intent,
                 )
                 if synthetic is not None:
                     candidate_tool_calls.append(synthetic)
-                    injected_temp_patch = True
                     _tool_debug("injected synthetic fs_apply_patch on step 0")
 
             if not candidate_tool_calls:
@@ -2660,26 +4299,69 @@ def chat(provider: str | None, model: str | None):
                 candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), model_text)
                 if cleaned_text:
                     render_assistant(console, cleaned_text)
-                    render_status_bar(
-                        console,
-                        f"{current_provider}/{current_model}",
-                        f"cost {result.get('v_cost', '?')} $V",
-                        workspace_root,
-                    )
+                render_status_bar(
+                    console,
+                    _status_actor(),
+                    f"cost {result.get('v_cost', '?')} $V",
+                    workspace_root,
+                )
+
+            candidate_tool_calls, synth_pre_errors, synth_pre_fired = _maybe_prepend_synth_write(
+                tool_reqs=candidate_tool_calls,
+                user_message=user_message,
+                model_text=model_text,
+                planner_edit_intent=edit_intent,
+                tool_observations=tool_observations,
+                reason_if_empty="no_tool_calls_with_code_block",
+                reason_if_non_mutating="non_mutating_candidates_only",
+                debug_label="prepended synthesized Write tool call before truncation",
+                preprocess=None,
+            )
+            for err in synth_pre_errors:
+                tool_observations.append(err)
 
             if not candidate_tool_calls:
+                code_blocks_count = len(_extract_fenced_code_blocks(model_text))
+                path_targets_count = len(_path_hints_from_message(user_message))
+                _tool_debug(
+                    "text-only gate pre-fallback: "
+                    f"candidate_count=0 "
+                    f"synth_pre_fired={synth_pre_fired} "
+                    f"code_blocks_count={code_blocks_count} "
+                    f"path_targets_count={path_targets_count} "
+                    f"patch_intent={_has_patch_intent(user_message)} "
+                    f"planner_edit_intent={edit_intent}"
+                )
                 fallback_req = _synth_patch_tool_req_for_intent(
                     user_message=user_message,
                     tool_observations=tool_observations,
-                    force_patch_intent=force_patch_intent,
+                    force_patch_intent=planner_edit_intent,
                 )
                 if fallback_req is not None:
                     candidate_tool_calls.append(fallback_req)
                     _tool_debug("fallback synthesized fs_apply_patch after model produced no tool request")
                 else:
+                    if completion_criteria.requires_mutation:
+                        synth_skip_reason = _diagnose_synth_write_skip_reason(
+                            user_message=user_message,
+                            model_text=model_text,
+                            tool_observations=tool_observations,
+                            planner_edit_intent=edit_intent,
+                        )
+                        if synth_skip_reason:
+                            emit_metric("tool_mutation_blocked_total", {"reason": synth_skip_reason})
+                            tool_observations.append(
+                                {
+                                    "status": "blocked",
+                                    "error": "synth_write_skipped",
+                                    "detail": synth_skip_reason,
+                                }
+                            )
+                    _tool_debug("finalizing/continuing with text-only answer after synth/fallback checks")
                     if await _continue_or_finalize_for_completion(
                         reason_if_finalize="completed",
                         step=step,
+                        edit_intent=edit_intent,
                     ):
                         return True
                     continue
@@ -2696,7 +4378,7 @@ def chat(provider: str | None, model: str | None):
                     model_text=model_text,
                     workspace_root=workspace_root,
                     tool_observations=tool_observations,
-                    force_patch_intent=force_patch_intent,
+                    force_patch_intent=planner_edit_intent,
                 )
                 if prep_error is not None:
                     tool_observations.append(prep_error)
@@ -2704,11 +4386,43 @@ def chat(provider: str | None, model: str | None):
                 if prepared is not None:
                     preprocessed_calls.append(prepared)
 
+            # Recovery: after preprocessing, if executable calls are still non-mutating
+            # (or empty), synthesize and preprocess Write from model code block.
+            preprocessed_calls, synth_post_errors, _ = _maybe_prepend_synth_write(
+                tool_reqs=preprocessed_calls,
+                user_message=user_message,
+                model_text=model_text,
+                planner_edit_intent=edit_intent,
+                tool_observations=tool_observations,
+                reason_if_empty="post_preprocess_no_tool_calls_with_code_block",
+                reason_if_non_mutating="post_preprocess_non_mutating_only",
+                debug_label="prepended synthesized Write tool call after preprocess",
+                preprocess=lambda req: _preprocess_tool_request_for_runtime(
+                    tool_req=req,
+                    user_message=user_message,
+                    model_text=model_text,
+                    workspace_root=workspace_root,
+                    tool_observations=tool_observations,
+                    force_patch_intent=planner_edit_intent,
+                ),
+            )
+            for err in synth_post_errors:
+                tool_observations.append(err)
+            synth_post_blocked = bool(synth_post_errors)
+
             if not preprocessed_calls:
+                if synth_post_blocked and completion_criteria.requires_mutation:
+                    if await _finalize_or_continue_with_intercept(
+                        reason="synth_prepare_blocked",
+                        edit_intent=edit_intent,
+                    ):
+                        return True
+                    continue
                 if any(str(obs.get("status")) == "noop" for obs in tool_observations):
                     if await _continue_or_finalize_for_completion(
                         reason_if_finalize="completed",
                         step=step,
+                        edit_intent=edit_intent,
                     ):
                         return True
                     continue
@@ -2718,6 +4432,7 @@ def chat(provider: str | None, model: str | None):
                 if await _continue_or_finalize_for_completion(
                     reason_if_finalize=reason,
                     step=step,
+                    edit_intent=edit_intent,
                 ):
                     return True
                 continue
@@ -2742,6 +4457,60 @@ def chat(provider: str | None, model: str | None):
                 shell_mode = tool_req.get("shell_mode")
                 timeout_sec = int(tool_req.get("timeout_sec", 30))
                 write_meta = tool_req.get("_write_meta") if isinstance(tool_req.get("_write_meta"), dict) else None
+                append_payload_fp: str | None = None
+                if tool_name == "fs_apply_patch" and isinstance(write_meta, dict):
+                    if str(write_meta.get("operation_kind") or "") == "append":
+                        append_path = str(write_meta.get("path") or "").strip().replace("\\", "/")
+                        append_content = write_meta.get("append_content")
+                        if append_path and isinstance(append_content, str) and append_content.strip():
+                            append_payload_fp = (
+                                f"{append_path}|{_sha256_hex(append_content.encode('utf-8'))}"
+                            )
+                if (
+                    append_payload_fp is not None
+                    and append_payload_fp in successful_append_payload_fingerprints
+                    and not _is_patch_repeat_followup_intent(user_message)
+                ):
+                    duplicate_suppressed = True
+                    emit_metric(
+                        "duplicate_mutation_block_total",
+                        {"intent": "append", "reason": "duplicate_append_same_payload_blocked"},
+                    )
+                    tool_observations.append(
+                        {
+                            "tool_name": tool_name,
+                            "status": "blocked",
+                            "error": "duplicate_append_same_payload_blocked",
+                            "detail": "Append payload already applied in this run; blocked repeated mutation.",
+                        }
+                    )
+                    continue
+
+                if tool_name == "fs_apply_patch" and isinstance(write_meta, dict):
+                    old_contents = write_meta.get("old_contents")
+                    new_contents = write_meta.get("new_contents")
+                    operation_kind = str(write_meta.get("operation_kind") or "full_replace").strip().lower()
+                    if isinstance(old_contents, str) and isinstance(new_contents, str):
+                        safety_ok, safety_reason = _validate_patch_safety(
+                            old_text=old_contents,
+                            new_text=new_contents,
+                            intent=operation_kind,
+                        )
+                        if not safety_ok:
+                            _emit_intent_validator_result(
+                                intent=operation_kind or "unknown",
+                                reason=str(safety_reason or "unknown"),
+                            )
+                            tool_observations.append(
+                                {
+                                    "tool_name": tool_name,
+                                    "status": "blocked",
+                                    "error": str(safety_reason or "patch_safety_blocked"),
+                                    "detail": "Patch safety validator blocked mutation before execution.",
+                                }
+                            )
+                            continue
+                        _emit_intent_validator_result(intent=operation_kind or "unknown")
 
                 policy = evaluate_tool_policy(
                     tool_name=tool_name,
@@ -2767,25 +4536,83 @@ def chat(provider: str | None, model: str | None):
                 ):
                     raw_diff_result: dict[str, Any] | None = None
                     diff_surface = ""
+                    ide_fallback_reason: str | None = None
                     write_path = str(write_meta.get("path") or "")
                     patch_text = str(arguments.get("patch") or "")
                     if (
                         bool(bridge_caps.get("connected"))
                         and bool(bridge_caps.get("show_diff"))
                     ):
+                        diff_timeout_sec = max(
+                            1.0,
+                            float(os.getenv("OPENVEGAS_IDE_INTERACTIVE_DIFF_TIMEOUT_SEC", "12")),
+                        )
                         try:
-                            raw_diff_result = await client.ide_show_diff(
-                                run_id=current_run_id,
-                                runtime_session_id=runtime_session_id,
-                                path=write_path,
-                                new_contents=str(write_meta.get("new_contents") or ""),
-                                allow_partial_accept=True,
+                            _maybe_prompt_vscode_extension_for_interactive_diff()
+                            envelope = await asyncio.wait_for(
+                                client.ide_message(
+                                    request_id=f"show-diff-{uuid.uuid4()}",
+                                    method="show_diff_interactive",
+                                    params={
+                                        "run_id": current_run_id,
+                                        "runtime_session_id": runtime_session_id,
+                                        "path": write_path,
+                                        "new_contents": str(write_meta.get("new_contents") or ""),
+                                        "allow_partial_accept": True,
+                                    },
+                                ),
+                                timeout=diff_timeout_sec,
                             )
-                            diff_surface = "ide"
-                            emit_metric("tool_show_diff_invoked_total", {"tool": "write"})
+                            if isinstance(envelope, dict) and isinstance(envelope.get("error"), dict):
+                                err = envelope.get("error") or {}
+                                code = str(err.get("code") or "")
+                                detail = str(err.get("detail") or "interactive show_diff failed")
+                                raise APIError(409, {"error": code or "show_diff_interactive_failed", "detail": detail})
+                            payload = envelope.get("result") if isinstance(envelope, dict) else None
+                            if not isinstance(payload, dict):
+                                ide_fallback_reason = "ide_bridge_unavailable"
+                                emit_metric(
+                                    "tool_diff_fallback_total",
+                                    {"from": "ide_interactive", "to": "terminal", "reason": "bridge_error"},
+                                )
+                                payload = None
+                            if isinstance(payload, dict):
+                                if is_valid_show_diff_payload(payload):
+                                    raw_diff_result = payload
+                                    diff_surface = "ide"
+                                    emit_metric("tool_show_diff_invoked_total", {"tool": "write"})
+                                    emit_metric("tool_diff_surface_total", {"surface": "ide_interactive"})
+                                else:
+                                    if _ide_bridge_trace_enabled():
+                                        _ide_bridge_debug(
+                                            "malformed interactive payload shape="
+                                            + json.dumps(
+                                                redact_show_diff_payload_shape(payload),
+                                                sort_keys=True,
+                                                ensure_ascii=False,
+                                            )
+                                        )
+                                    emit_metric(
+                                        "tool_diff_fallback_total",
+                                        {"from": "ide_interactive", "to": "terminal", "reason": "malformed_payload"},
+                                    )
+                                    ide_fallback_reason = "malformed_diff_payload"
+                                    raw_diff_result = None
+                        except asyncio.TimeoutError:
+                            emit_metric(
+                                "tool_diff_fallback_total",
+                                {"from": "ide_interactive", "to": "terminal", "reason": "timeout"},
+                            )
+                            ide_fallback_reason = "timeout"
+                            raw_diff_result = None
                         except APIError as e:
                             body = e.data if isinstance(e.data, dict) else {}
                             code = str(body.get("error") or "")
+                            emit_metric(
+                                "tool_diff_fallback_total",
+                                {"from": "ide_interactive", "to": "terminal", "reason": "bridge_error"},
+                            )
+                            ide_fallback_reason = "ide_bridge_unavailable"
                             if code in {"invalid_transition"}:
                                 bridge_caps["connected"] = False
                                 bridge_caps["show_diff"] = False
@@ -2793,6 +4620,14 @@ def chat(provider: str | None, model: str | None):
                             else:
                                 detail = body.get("detail", e.detail)
                                 console.print(f"[yellow]show_diff skipped: {detail}[/yellow]")
+                        except Exception as e:
+                            emit_metric(
+                                "tool_diff_fallback_total",
+                                {"from": "ide_interactive", "to": "terminal", "reason": "bridge_error"},
+                            )
+                            ide_fallback_reason = "ide_bridge_unavailable"
+                            if _ide_bridge_trace_enabled():
+                                _ide_bridge_debug(f"interactive diff bridge error={type(e).__name__}: {e}")
 
                     if raw_diff_result is None and patch_text.strip() and _terminal_diff_fallback_enabled():
                         parsed_original = parse_unified_patch_terminal(patch_text)
@@ -2844,6 +4679,9 @@ def chat(provider: str | None, model: str | None):
                         emit_metric("tool_show_diff_skipped_total", {"reason": "terminal_fallback_disabled"})
 
                     if raw_diff_result is not None:
+                        raw_diff_error = ""
+                        if isinstance(raw_diff_result, dict):
+                            raw_diff_error = str(raw_diff_result.get("error") or "").strip().lower()
                         diff_result = normalize_show_diff_result(raw_diff_result, default_path=write_path)
                         decisions = diff_result.get("decisions", [])
                         hunks_total = int(diff_result.get("hunks_total", len(decisions)))
@@ -2871,12 +4709,21 @@ def chat(provider: str | None, model: str | None):
                                 "tool_diff_decision_total",
                                 {"diff_surface": diff_surface or "unknown", "diff_outcome": reject_reason},
                             )
+                            blocked_reason = "All diff hunks were rejected."
+                            if raw_diff_error == "non_tty":
+                                blocked_reason = "edit blocked: non_interactive_terminal"
+                            elif raw_diff_error == "timeout" or reject_reason == "timeout":
+                                blocked_reason = "edit blocked: timeout"
+                            elif ide_fallback_reason == "malformed_diff_payload":
+                                blocked_reason = "edit blocked: malformed_diff_payload"
+                            elif ide_fallback_reason == "ide_bridge_unavailable":
+                                blocked_reason = "edit blocked: ide_bridge_unavailable"
                             tool_observations.append(
                                 {
                                     "tool_name": tool_name,
                                     "status": "blocked",
                                     "error": "user_declined_edit",
-                                    "detail": "All diff hunks were rejected.",
+                                    "detail": blocked_reason,
                                 }
                             )
                             continue
@@ -2943,6 +4790,8 @@ def chat(provider: str | None, model: str | None):
                 call_key = _semantic_tool_signature(tool_name, arguments, str(shell_mode or "read_only"))
                 if executed_tool_calls.get(call_key, 0) >= 1:
                     duplicate_suppressed = True
+                    if tool_name == "fs_read":
+                        emit_metric("tool_duplicate_read_suppressed_total", {"tool": "fs_read"})
                     tool_observations.append(
                         {
                             "tool_name": tool_name,
@@ -2956,6 +4805,7 @@ def chat(provider: str | None, model: str | None):
                 if policy == ToolPolicyDecision.ASK:
                     action_scope = action_scope_for(tool_name, arguments if isinstance(arguments, dict) else {})
                     if not should_auto_allow(session_approval, action_scope):
+                        dealer_panel.render(map_lifecycle_event_to_state("approval_wait"), "approval required")
                         action_label = describe_tool_action(tool_name, arguments)
                         _drain_stdin_buffer(window_ms=0)
                         decision = choose_approval(
@@ -3074,6 +4924,10 @@ def chat(provider: str | None, model: str | None):
                 event_label = describe_tool_action(tool_name, arguments)
                 event_detail = f"id={tool_call_id}" if verbose_tool_events else ""
                 render_tool_event(console, event_label, event_detail)
+                dealer_panel.render(
+                    map_lifecycle_event_to_state("tool_start", tool_name=tool_name, status="running"),
+                    event_label,
+                )
                 outcome, inactive_status = await _execute_with_heartbeat(
                     tool_request=tool_request,
                     tool_call_id=tool_call_id,
@@ -3085,6 +4939,10 @@ def chat(provider: str | None, model: str | None):
                     emit_metric(
                         "tool_heartbeat_miss_total",
                         {"remote_status": str(inactive_status or "inactive")},
+                    )
+                    dealer_panel.render(
+                        map_lifecycle_event_to_state("tool_result", tool_name=tool_name, status="failed"),
+                        str(inactive_status or "inactive"),
                     )
                     tool_observations.append(
                         {
@@ -3318,9 +5176,13 @@ def chat(provider: str | None, model: str | None):
                     describe_tool_action(tool_name, arguments),
                     str(outcome.result_status),
                 )
+                dealer_panel.render(
+                    map_tool_event_to_avatar_state(tool_name, str(outcome.result_status)),
+                    describe_tool_action(tool_name, arguments),
+                )
                 render_status_bar(
                     console,
-                    f"{current_provider}/{current_model}",
+                    _status_actor(),
                     f"tool {str(outcome.result_status)}",
                     workspace_root,
                 )
@@ -3329,6 +5191,8 @@ def chat(provider: str | None, model: str | None):
                     _tool_debug(f"last_successful_tool={last_successful_tool}")
                     if tool_name == "fs_apply_patch":
                         repeated_patch_failures.clear()
+                        if append_payload_fp is not None:
+                            successful_append_payload_fingerprints.add(append_payload_fp)
                 elif tool_name == "fs_apply_patch":
                     failure_sig = _patch_failure_signature(
                         arguments=arguments if isinstance(arguments, dict) else {},
@@ -3347,19 +5211,27 @@ def chat(provider: str | None, model: str | None):
                                 "detail": "Repeated identical patch failure; stopped retry loop.",
                             }
                         )
-                        return await _force_finalize(
-                            tool_observations,
+                        if await _finalize_or_continue_with_intercept(
                             reason="patch_recovery_failed_same_intent_circuit_break",
-                        )
+                            edit_intent=edit_intent,
+                        ):
+                            return True
+                        continue
                 executed_tool_calls[call_key] = executed_tool_calls.get(call_key, 0) + 1
                 did_any_execution = True
                 if terminal_reason is not None:
-                    return await _force_finalize(tool_observations, reason=terminal_reason)
+                    if await _finalize_or_continue_with_intercept(
+                        reason=terminal_reason,
+                        edit_intent=edit_intent,
+                    ):
+                        return True
+                    continue
 
-            if injected_temp_patch and did_any_execution:
+            if did_any_execution:
                 if await _continue_or_finalize_for_completion(
                     reason_if_finalize="completed",
                     step=step,
+                    edit_intent=edit_intent,
                 ):
                     return True
                 continue
@@ -3371,14 +5243,25 @@ def chat(provider: str | None, model: str | None):
                             if not active_mutation_observation_changed
                             else "active_mutation_timeout"
                         )
-                        return await _force_finalize(tool_observations, reason=timeout_reason)
+                        if await _finalize_or_continue_with_intercept(
+                            reason=timeout_reason,
+                            edit_intent=edit_intent,
+                        ):
+                            return True
+                        continue
                     if pending_retry_tool_req is not None:
                         continue
-                    return await _force_finalize(tool_observations, reason="active_mutation_in_progress")
+                    if await _finalize_or_continue_with_intercept(
+                        reason="active_mutation_in_progress",
+                        edit_intent=edit_intent,
+                    ):
+                        return True
+                    continue
                 if duplicate_suppressed:
                     if await _continue_or_finalize_for_completion(
                         reason_if_finalize="duplicate_suppressed",
                         step=step,
+                        edit_intent=edit_intent,
                     ):
                         return True
                     continue
@@ -3386,6 +5269,7 @@ def chat(provider: str | None, model: str | None):
                     if await _continue_or_finalize_for_completion(
                         reason_if_finalize="policy_denied",
                         step=step,
+                        edit_intent=edit_intent,
                     ):
                         return True
                     continue
@@ -3393,19 +5277,23 @@ def chat(provider: str | None, model: str | None):
                     if await _continue_or_finalize_for_completion(
                         reason_if_finalize="unknown_tool",
                         step=step,
+                        edit_intent=edit_intent,
                     ):
                         return True
                     continue
                 if await _continue_or_finalize_for_completion(
                     reason_if_finalize="blocked_invalid_args",
                     step=step,
+                    edit_intent=edit_intent,
                 ):
                     return True
                 continue
         console.print(f"[yellow]Stopped after max tool iterations ({max_tool_steps}).[/yellow]")
         if completion_criteria.active and not _completion_eval().satisfied:
-            return await _force_finalize(tool_observations, reason="completion_criteria_unmet_after_retries")
-        return await _force_finalize(tool_observations, reason="max_iterations")
+            final_res = await _request_final_response(tool_observations)
+            return await _force_finalize(final_res, reason="completion_criteria_unmet_after_retries")
+        final_res = await _request_final_response(tool_observations)
+        return await _force_finalize(final_res, reason="max_iterations")
 
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
@@ -3480,9 +5368,7 @@ def chat(provider: str | None, model: str | None):
         def _read_chat_message() -> str:
             first = Prompt.ask("chat")
             extras = _drain_stdin_buffer(window_ms=40)
-            if not extras:
-                return first.strip()
-            return "\n".join([first, *extras]).strip()
+            return _merge_chat_prompt_and_buffered_lines(first, extras)
 
         client = OpenVegasClient()
         try:
@@ -3490,6 +5376,19 @@ def chat(provider: str | None, model: str | None):
             conversation_mode = str(mode.get("conversation_mode", "persistent"))
         except Exception:
             conversation_mode = "persistent"
+        if current_provider == "openai":
+            try:
+                models_resp = await client.list_models("openai")
+                enabled_models = [
+                    str(m.get("model_id", "")).strip()
+                    for m in models_resp.get("models", [])
+                    if m.get("enabled")
+                ]
+                selected = _pick_preferred_model(enabled_models, current_model)
+                if selected and selected != current_model:
+                    current_model = selected
+            except Exception:
+                pass
 
         try:
             run_info = await client.agent_run_create(state="running", is_resumable=True)
@@ -3509,9 +5408,13 @@ def chat(provider: str | None, model: str | None):
             current_run_version = 0
             current_signature = "sha256:"
 
-        console.print(f"OpenVegas Chat · {current_provider}/{current_model} · {conversation_mode}")
+        if show_model_meta:
+            console.print(f"OpenVegas Chat · {current_provider}/{current_model} · {conversation_mode}")
+        else:
+            console.print(f"OpenVegas Chat · {conversation_mode}")
         console.print("Type /help for commands")
-        render_status_bar(console, f"{current_provider}/{current_model}", "ready", workspace_root)
+        render_status_bar(console, _status_actor(), "ready", workspace_root)
+        dealer_panel.render("idle", "ready")
 
         while True:
             message = _read_chat_message()
@@ -3529,10 +5432,14 @@ def chat(provider: str | None, model: str | None):
                     _show_help()
                     continue
                 if cmd == "/status":
+                    provider_line = (
+                        f"[bold]Provider:[/bold] {current_provider}\n[bold]Model:[/bold] {current_model}\n"
+                        if show_model_meta
+                        else "[bold]Provider/Model:[/bold] hidden by policy\n"
+                    )
                     console.print(
                         Panel(
-                            f"[bold]Provider:[/bold] {current_provider}\n"
-                            f"[bold]Model:[/bold] {current_model}\n"
+                            f"{provider_line}"
                             f"[bold]Thread:[/bold] {current_thread_id or '(none)'}\n"
                             f"[bold]Run:[/bold] {current_run_id or '(none)'}\n"
                             f"[bold]Run Version:[/bold] {current_run_version}\n"
@@ -3608,6 +5515,9 @@ def chat(provider: str | None, model: str | None):
                     console.print(f"[green]Approval mode set to {approval_mode}.[/green]")
                     continue
                 if cmd == "/provider":
+                    if not allow_model_switch:
+                        console.print("[yellow]Provider switching is disabled in this environment.[/yellow]")
+                        continue
                     if len(parts) < 2:
                         console.print("[red]Usage: /provider <openai|anthropic|gemini> [model][/red]")
                         continue
@@ -3628,6 +5538,9 @@ def chat(provider: str | None, model: str | None):
                     console.print(f"[green]Provider/model set to {current_provider}/{current_model}.[/green]")
                     continue
                 if cmd == "/model":
+                    if not allow_model_switch:
+                        console.print("[yellow]Model switching is disabled in this environment.[/yellow]")
+                        continue
                     if len(parts) < 2:
                         console.print("[red]Usage: /model <model_id>[/red]")
                         continue
@@ -3687,17 +5600,25 @@ def chat(provider: str | None, model: str | None):
                 if code in {"insufficient_balance", "balance_insufficient"}:
                     await _maybe_render_low_balance_hint(force=True)
                 if code == "model_disabled":
-                    suggestions: list[str] = []
+                    enabled_models: list[str] = []
                     try:
                         models_resp = await client.list_models(current_provider)
                         for m in models_resp.get("models", []):
                             if m.get("enabled"):
-                                suggestions.append(str(m.get("model_id", "")))
-                        suggestions = [s for s in suggestions if s][:3]
+                                enabled_models.append(str(m.get("model_id", "")))
                     except Exception:
-                        suggestions = []
+                        enabled_models = []
+                    suggestions = [s for s in enabled_models if s][:3]
+                    if not allow_model_switch and suggestions:
+                        previous_model = current_model
+                        current_model = _pick_preferred_model(enabled_models, current_model)
+                        console.print(
+                            "[yellow]Model unavailable; auto-switched "
+                            f"{previous_model} -> {current_model}.[/yellow]"
+                        )
+                        continue
                     console.print(f"[red]{e.detail}[/red]")
-                    if suggestions:
+                    if suggestions and allow_model_switch:
                         console.print(
                             "[yellow]Try:[/yellow] "
                             + " ".join(f"`/model {m}`" for m in suggestions)
@@ -3881,20 +5802,12 @@ def store_grants():
 
 @cli.command()
 @click.argument("game_id")
-@click.option("--demo", is_flag=True, help="Verify against demo verification endpoint (non-canonical).")
-def verify(game_id: str, demo: bool):
+def verify(game_id: str):
     """Verify a provably fair game outcome."""
     async def _verify():
         from openvegas.client import OpenVegasClient, APIError
         try:
             client = OpenVegasClient()
-            if demo:
-                data = await client.verify_demo_game(game_id)
-                console.print("[bold yellow]DEMO VERIFY[/bold yellow] [dim](canonical: false)[/dim]")
-                console.print(f"  Server seed hash: {data.get('server_seed_hash', '')[:16]}...")
-                console.print(f"  Nonce:            {data.get('nonce', '')}")
-                return
-
             data = await client.verify_game(game_id)
             from openvegas.rng.provably_fair import ProvablyFairRNG
 
@@ -3918,7 +5831,6 @@ def verify(game_id: str, demo: bool):
 
 
 @cli.command("ui")
-@click.option("--full", is_flag=True, help="Use legacy full-screen Textual UI mode.")
 @click.option("--no-render", is_flag=True, help="Skip game animation rendering in inline UI.")
 @click.option(
     "--render-timeout-sec",
@@ -3927,17 +5839,8 @@ def verify(game_id: str, demo: bool):
     show_default=True,
     help="Inline UI render timeout in seconds.",
 )
-def interactive_ui(full: bool, no_render: bool, render_timeout_sec: float):
+def interactive_ui(no_render: bool, render_timeout_sec: float):
     """Open guided terminal UI."""
-    if full:
-        try:
-            from openvegas.tui.wizard import run_wizard
-        except Exception as e:  # pragma: no cover - runtime-only import fallback
-            console.print(f"[red]Unable to load full UI mode: {e}[/red]")
-            return
-        run_wizard()
-        return
-
     try:
         from openvegas.tui.prompt_ui import run_prompt_ui
     except Exception as e:  # pragma: no cover - runtime-only import fallback
@@ -4012,9 +5915,13 @@ def config_show():
     # Redact sensitive fields
     display = dict(config)
     if "session" in display:
-        display["session"] = {
-            k: v[:8] + "..." if v else "" for k, v in display["session"].items()
-        }
+        redacted_session: dict[str, Any] = {}
+        for k, v in display["session"].items():
+            if isinstance(v, str):
+                redacted_session[k] = v[:8] + "..." if v else ""
+            else:
+                redacted_session[k] = v
+        display["session"] = redacted_session
     for p in display.get("providers", {}):
         if "api_key" in display["providers"][p]:
             key = display["providers"][p]["api_key"]

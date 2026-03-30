@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from openvegas.casino.constants import min_game_wager_v
 from openvegas.wallet.ledger import InsufficientBalance
 from server.middleware.auth import get_current_user
 from server.services.dependencies import get_human_casino_service
@@ -130,11 +131,14 @@ async def list_games(user: dict = Depends(get_current_user)):
 async def start_round(req: StartRoundRequest, user: dict = Depends(get_current_user)):
     svc = get_human_casino_service()
     try:
+        wager = Decimal(str(req.wager_v))
+        if wager < min_game_wager_v():
+            raise HTTPException(status_code=400, detail=f"Wager must be at least {min_game_wager_v()} $V")
         resp = await svc.start_round(
             user_id=user["user_id"],
             session_id=req.casino_session_id,
             game_code=req.game_code,
-            wager_v=Decimal(str(req.wager_v)),
+            wager_v=wager,
             idempotency_key=req.idempotency_key,
         )
         return _json_response(resp.status_code, resp.body_text)
