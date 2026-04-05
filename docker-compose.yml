@@ -1,0 +1,40 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────
+#  OpenVegas — Local Production-Like Environment
+# ──────────────────────────────────────────────
+#  Mimics what Railway will run. Uses your Supabase-hosted
+#  DB (not a local Postgres), since the app depends on
+#  Supabase Auth / RLS / JWT — not plain Postgres.
+#
+#  Usage:
+#    cp .env.production.example .env
+#    # Fill in real values
+#    docker compose up --build
+# ──────────────────────────────────────────────
+
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - .env
+    environment:
+      - PORT=${PORT:-8000}
+      - OPENVEGAS_RUNTIME_ENV=production
+    depends_on:
+      redis:
+        condition: service_started   # NOT service_healthy — Redis is optional
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${PORT:-8000}/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # No healthcheck gate — if Redis dies, the app continues with the stub.
