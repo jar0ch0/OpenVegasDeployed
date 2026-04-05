@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 COPY openvegas/ openvegas/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e ".[server]"
+    pip install --no-cache-dir -e ".[server]" && \
+    pip install --no-cache-dir psycopg2-binary
 
 # ── Copy the rest of the application ────────
 COPY server/                server/
