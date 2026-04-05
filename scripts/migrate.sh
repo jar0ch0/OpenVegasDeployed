@@ -65,8 +65,50 @@ cur.execute("""
     );
 """)
 
-# ── Discover and sort migration files ───────
-# Files are named 001_*.sql through 017_*.sql (and growing).
+# ── Check if this is a fresh schema_version on an existing database ─
+# If schema_version is empty but tables already exist (e.g. "profiles"),
+# this database was set up before we added migration tracking.
+# Mark all known migration files as already applied so we don't
+# try to re-create existing tables.
+cur.execute("SELECT count(*) FROM schema_version")
+tracked_count = cur.fetchone()[0]
+
+if tracked_count == 0:
+    # Check if the database already has tables from previous setup
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = 'public' AND table_name = 'profiles'
+        )
+    """)
+    db_already_populated = cur.fetchone()[0]
+
+    if db_already_populated:
+        print("[migrate] Detected existing database with no migration tracking.")
+        print("[migrate] Marking all current migration files as already applied...")
+        migration_files = sorted(glob.glob(os.path.join(migrations_dir, "*.sql")))
+        for path in migration_files:
+            version = os.path.basename(path)
+            cur.execute(
+                "INSERT INTO schema_version (version) VALUES (%s) ON CONFLICT DO NOTHING",
+                (version,)
+            )
+        # Also mark seed as applied since the DB is already populated
+        cur.execute(
+            "INSERT INTO schema_version (version) VALUES ('__seed__') ON CONFLICT DO NOTHING"
+        )
+        count = len(migration_files)
+        print(f"[migrate] Marked {count} migrations + seed as already applied.")
+        print("[migrate] Future deploys will only run NEW migration files.")
+
+        cur.execute("SELECT version FROM schema_version ORDER BY applied_at DESC LIMIT 1")
+        row = cur.fetchone()
+        print(f"[migrate] Current schema version: {row[0] if row else '(none)'}")
+        cur.close()
+        conn.close()
+        sys.exit(0)
+
+# ── Normal migration path: apply any unapplied migrations ───────
 migration_files = sorted(glob.glob(os.path.join(migrations_dir, "*.sql")))
 
 if not migration_files:
