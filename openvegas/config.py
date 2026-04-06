@@ -16,12 +16,20 @@ from openvegas.telemetry import emit_metric
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
-_frozen_default = (
-    "https://openvegasdeployed-production.up.railway.app"
-    if getattr(sys, "frozen", False)
-    else "http://127.0.0.1:8000"
+_is_frozen = getattr(sys, "frozen", False)
+
+DEFAULT_BACKEND_URL = os.getenv(
+    "OPENVEGAS_BACKEND_URL",
+    "https://openvegasdeployed-production.up.railway.app" if _is_frozen else "http://127.0.0.1:8000",
 )
-DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", _frozen_default)
+DEFAULT_SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    "https://exigkcsxqaxckinbrsma.supabase.co" if _is_frozen else "",
+)
+DEFAULT_SUPABASE_ANON_KEY = os.getenv(
+    "SUPABASE_ANON_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4aWdrY3N4cWF4Y2tpbmJyc21hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI5MzQ4NzQsImV4cCI6MjA4ODUxMDg3NH0.r4IY1wMVYKMjOAZewx2qRD50jQrH6xJWGi5jPH1cQ4Y" if _is_frozen else "",
+)
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
 _PLATFORM_STORE_ACCOUNT = "refresh_token"
@@ -43,8 +51,8 @@ DEFAULT_CONFIG = {
     "tool_event_density": "compact",
     "approval_ui": "menu",
     "backend_url": DEFAULT_BACKEND_URL,
-    "supabase_url": "",
-    "supabase_anon_key": "",
+    "supabase_url": DEFAULT_SUPABASE_URL,
+    "supabase_anon_key": DEFAULT_SUPABASE_ANON_KEY,
     "avatar_id": "ov_user_01",
     "avatar_palette": "default",
     "dealer_skin_id": "ov_dealer_female_tux_v1",
@@ -69,6 +77,11 @@ def load_config() -> dict:
             stored = json.loads(f.read())
         if stored.get("backend_url") == LEGACY_DEFAULT_BACKEND_URL:
             stored["backend_url"] = DEFAULT_BACKEND_URL
+        # Migrate empty supabase credentials to frozen defaults (binary installs).
+        if not stored.get("supabase_url") and DEFAULT_SUPABASE_URL:
+            stored["supabase_url"] = DEFAULT_SUPABASE_URL
+        if not stored.get("supabase_anon_key") and DEFAULT_SUPABASE_ANON_KEY:
+            stored["supabase_anon_key"] = DEFAULT_SUPABASE_ANON_KEY
         # Migrate legacy OpenAI default model to current GPT-5.4 default
         # unless user explicitly set a non-legacy value.
         stored_models = dict(stored.get("default_model_by_provider") or {})
