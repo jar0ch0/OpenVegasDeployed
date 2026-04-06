@@ -199,8 +199,11 @@ app.include_router(ops_diagnostics_routes.router, tags=["ops"])
 
 
 @app.get("/")
-async def root_redirect():
-    return RedirectResponse(url="/ui", status_code=308)
+async def root_redirect(request: Request):
+    host = (request.headers.get("host", "") or "").split(":", 1)[0].strip().lower()
+    if host == "openvegas.ai":
+        return RedirectResponse(url="/ui", status_code=308)
+    return {"status": "ok", "service": "openvegas-api"}
 
 
 @app.get("/health")
