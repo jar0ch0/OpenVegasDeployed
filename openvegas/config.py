@@ -17,11 +17,13 @@ CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
 LEGACY_FROZEN_BACKEND_URL = "https://openvegasdeployed-production.up.railway.app"
+LEGACY_LOCAL_BACKEND_URL = "http://127.0.0.1:8000"
+FROZEN_DEFAULT_BACKEND_URL = "https://app.openvegas.ai"
 _is_frozen = getattr(sys, "frozen", False)
 
 DEFAULT_BACKEND_URL = os.getenv(
     "OPENVEGAS_BACKEND_URL",
-    "https://app.openvegas.ai" if _is_frozen else "http://127.0.0.1:8000",
+    FROZEN_DEFAULT_BACKEND_URL if _is_frozen else LEGACY_LOCAL_BACKEND_URL,
 )
 DEFAULT_SUPABASE_URL = os.getenv(
     "SUPABASE_URL",
@@ -62,6 +64,30 @@ DEFAULT_CONFIG = {
 _SESSION_CLAIMS_CACHE: dict[str, Any] | None = None
 
 
+def _should_migrate_backend_url(stored_backend_url: str) -> bool:
+    token = str(stored_backend_url or "").strip()
+    if not token:
+        return False
+    legacy_urls = {
+        LEGACY_DEFAULT_BACKEND_URL,
+        LEGACY_FROZEN_BACKEND_URL,
+    }
+    if _is_frozen:
+        legacy_urls.add(LEGACY_LOCAL_BACKEND_URL)
+    return token in legacy_urls
+
+
+def _persist_loaded_config_best_effort(config: dict) -> None:
+    try:
+        save_config_atomic(config)
+        try:
+            CONFIG_FILE.chmod(0o600)
+        except Exception:
+            pass
+    except Exception:
+        logger.debug("best-effort config persistence failed", exc_info=True)
+
+
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -76,13 +102,17 @@ def load_config() -> dict:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
             stored = json.loads(f.read())
-        if stored.get("backend_url") in {LEGACY_DEFAULT_BACKEND_URL, LEGACY_FROZEN_BACKEND_URL}:
-            stored["backend_url"] = DEFAULT_BACKEND_URL
+        mutated = False
+        if _should_migrate_backend_url(str(stored.get("backend_url") or "")):
+            stored["backend_url"] = FROZEN_DEFAULT_BACKEND_URL if _is_frozen else DEFAULT_BACKEND_URL
+            mutated = True
         # Migrate empty supabase credentials to frozen defaults (binary installs).
         if not stored.get("supabase_url") and DEFAULT_SUPABASE_URL:
             stored["supabase_url"] = DEFAULT_SUPABASE_URL
+            mutated = True
         if not stored.get("supabase_anon_key") and DEFAULT_SUPABASE_ANON_KEY:
             stored["supabase_anon_key"] = DEFAULT_SUPABASE_ANON_KEY
+            mutated = True
         # Migrate legacy OpenAI default model to current GPT-5.4 default
         # unless user explicitly set a non-legacy value.
         stored_models = dict(stored.get("default_model_by_provider") or {})
@@ -90,7 +120,11 @@ def load_config() -> dict:
         if openai_model in {"", "gpt-4o-mini", "gpt-5.3-codex"}:
             stored_models["openai"] = DEFAULT_OPENAI_MODEL
             stored["default_model_by_provider"] = stored_models
-        return {**DEFAULT_CONFIG, **stored}
+            mutated = True
+        merged = {**DEFAULT_CONFIG, **stored}
+        if mutated:
+            _persist_loaded_config_best_effort(merged)
+        return merged
     return dict(DEFAULT_CONFIG)
 
 

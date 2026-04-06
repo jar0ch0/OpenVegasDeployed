@@ -1109,6 +1109,11 @@ class AIGateway:
     async def _resolve_provider_api_key(self, provider: str) -> str:
         """Resolve provider credentials with registry-first precedence."""
         runtime_env = os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local")).strip() or "local"
+        canonical_env_name = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+        }.get(provider, "")
         row = None
         try:
             row = await self.db.fetchrow(
@@ -1130,21 +1135,14 @@ class AIGateway:
         if row:
             key_alias = str(row["key_alias"]).strip()
             key = os.getenv(key_alias, "").strip()
+            if not key and canonical_env_name and key_alias != canonical_env_name:
+                key = os.getenv(canonical_env_name, "").strip()
             if key:
                 return key
-            raise ContractError(
-                APIErrorCode.PROVIDER_UNAVAILABLE,
-                f"No active provider credentials configured for {provider}.",
-            )
 
         allow_env_fallback = runtime_env.lower() in {"local", "dev", "development", "test"}
-        if allow_env_fallback:
-            env_name = {
-                "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "gemini": "GEMINI_API_KEY",
-            }.get(provider, "")
-            key = os.getenv(env_name, "").strip()
+        if allow_env_fallback or canonical_env_name:
+            key = os.getenv(canonical_env_name, "").strip()
             if key:
                 return key
 

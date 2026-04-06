@@ -236,6 +236,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "033_avatar_preferences")
     await require_migration_min(db, "036_profile_theme_preferences")
     await require_migration_min(db, "037_chat_file_uploads")
+    await require_migration_min(db, "038_provider_credential_alias_defaults")
 
     await require_tables(
         db,

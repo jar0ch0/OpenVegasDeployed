@@ -82,7 +82,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="OpenVegas API",
-    version="0.1.1",
+    version="0.2.0",
     description="Terminal Arcade for Developers",
     lifespan=lifespan,
 )

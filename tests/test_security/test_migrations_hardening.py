@@ -46,6 +46,7 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "033_avatar_preferences")' in deps
     assert 'require_migration_min(db, "036_profile_theme_preferences")' in deps
     assert 'require_migration_min(db, "037_chat_file_uploads")' in deps
+    assert 'require_migration_min(db, "038_provider_credential_alias_defaults")' in deps
     assert '"horse_quotes"' in deps
     assert '"horse_quote_idempotency"' in deps
     assert '"provider_credentials"' in deps
@@ -200,6 +201,15 @@ def test_agent_chat_turns_optional_migration_exists():
     assert "CREATE TABLE IF NOT EXISTS agent_chat_turns" in sql
     assert "UNIQUE (run_id, turn_no)" in sql
     assert "024_agent_chat_turns_optional_v30" in sql
+
+
+def test_provider_credential_alias_defaults_migration_exists():
+    sql = _read("supabase/migrations/038_provider_credential_alias_defaults.sql")
+    assert "provider_credentials" in sql
+    assert "'openai', 'production', 'OPENAI_API_KEY'" in sql
+    assert "'anthropic', 'production', 'ANTHROPIC_API_KEY'" in sql
+    assert "'gemini', 'production', 'GEMINI_API_KEY'" in sql
+    assert "038_provider_credential_alias_defaults" in sql
 
 
 def test_agent_tool_heartbeat_column_fix_migration_exists():
