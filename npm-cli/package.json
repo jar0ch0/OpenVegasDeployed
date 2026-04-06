@@ -2,6 +2,13 @@
   "name": "openvegas",
   "version": "0.1.1",
   "description": "OpenVegas CLI — Terminal Arcade for Developers",
+  "keywords": [
+    "ai",
+    "cli",
+    "developer-tools",
+    "openvegas",
+    "terminal"
+  ],
   "type": "commonjs",
   "bin": {
     "openvegas": "bin/openvegas.js"
@@ -18,7 +25,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/jar0ch0/OpenVegasDeployed"
+    "url": "git+https://github.com/jar0ch0/OpenVegasDeployed.git"
+  },
+  "homepage": "https://github.com/jar0ch0/OpenVegasDeployed#readme",
+  "bugs": {
+    "url": "https://github.com/jar0ch0/OpenVegasDeployed/issues"
   },
   "license": "MIT"
 }

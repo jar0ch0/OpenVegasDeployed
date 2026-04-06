@@ -177,6 +177,21 @@ When the tag is pushed, GitHub Actions:
 - builds binaries for `linux-x64`, `darwin-arm64`, and `win-x64`
 - generates SHA256 checksum files
 - publishes the binaries to the GitHub Release for that tag
+- publishes the npm package from `npm-cli/` after the GitHub Release is published
+
+npm publishing is handled by [`.github/workflows/npm-publish.yml`](./.github/workflows/npm-publish.yml) and requires a repository secret named `NPM_TOKEN`.
+
+The workflow supports both:
+
+- automatic publish on future GitHub Releases
+- manual `workflow_dispatch` for already-cut tags such as `v0.1.1`
+
+One-time npm setup:
+
+- create the npm package under the account that should own `openvegas`
+- create an npm access token with publish rights
+- add it to GitHub repository secrets as `NPM_TOKEN`
+- make sure the package name `openvegas` is available or already owned by your npm account
 
 You can also build a binary locally with:
 
