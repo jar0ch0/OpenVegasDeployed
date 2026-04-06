@@ -16,11 +16,12 @@ from openvegas.telemetry import emit_metric
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
+LEGACY_FROZEN_BACKEND_URL = "https://openvegasdeployed-production.up.railway.app"
 _is_frozen = getattr(sys, "frozen", False)
 
 DEFAULT_BACKEND_URL = os.getenv(
     "OPENVEGAS_BACKEND_URL",
-    "https://openvegasdeployed-production.up.railway.app" if _is_frozen else "http://127.0.0.1:8000",
+    "https://app.openvegas.ai" if _is_frozen else "http://127.0.0.1:8000",
 )
 DEFAULT_SUPABASE_URL = os.getenv(
     "SUPABASE_URL",
@@ -75,7 +76,7 @@ def load_config() -> dict:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
             stored = json.loads(f.read())
-        if stored.get("backend_url") == LEGACY_DEFAULT_BACKEND_URL:
+        if stored.get("backend_url") in {LEGACY_DEFAULT_BACKEND_URL, LEGACY_FROZEN_BACKEND_URL}:
             stored["backend_url"] = DEFAULT_BACKEND_URL
         # Migrate empty supabase credentials to frozen defaults (binary installs).
         if not stored.get("supabase_url") and DEFAULT_SUPABASE_URL:

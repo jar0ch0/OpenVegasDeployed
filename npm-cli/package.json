@@ -1,6 +1,6 @@
 {
   "name": "openvegas",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenVegas CLI — Terminal Arcade for Developers",
   "type": "commonjs",
   "bin": {
