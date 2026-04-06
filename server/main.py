@@ -198,6 +198,11 @@ app.include_router(realtime_routes.router, tags=["realtime"])
 app.include_router(ops_diagnostics_routes.router, tags=["ops"])
 
 
+@app.get("/")
+async def root_redirect():
+    return RedirectResponse(url="/ui", status_code=308)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
