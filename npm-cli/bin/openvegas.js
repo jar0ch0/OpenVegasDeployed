@@ -28,7 +28,7 @@ function getTarget() {
   if (!platform || !arch) {
     console.error(
       `[openvegas] Unsupported platform: ${process.platform}/${process.arch}\n` +
-      `Supported: linux/x64, darwin/arm64, darwin/x64, win32/x64\n\n` +
+      `Supported: linux/x64, darwin/arm64 (Intel Macs: use Rosetta 2), win32/x64\n\n` +
       `To install manually:\n` +
       `  https://github.com/jar0ch0/OpenVegasDeployed/releases`,
     );

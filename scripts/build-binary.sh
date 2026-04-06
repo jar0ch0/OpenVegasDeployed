@@ -12,7 +12,7 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 case "$TARGET" in
-  linux-x64|darwin-arm64|darwin-x64)
+  linux-x64|darwin-arm64)
     BINARY_NAME="openvegas-${TARGET}"
     EXE_SUFFIX=""
     ;;
