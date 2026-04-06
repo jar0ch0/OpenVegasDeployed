@@ -1,10 +1,24 @@
 {
-  "name": "@openvegas/cli",
+  "name": "openvegas",
   "version": "0.1.0",
-  "description": "npm wrapper for the OpenVegas Python CLI",
-  "type": "module",
+  "description": "OpenVegas CLI — Terminal Arcade for Developers",
+  "type": "commonjs",
   "bin": {
     "openvegas": "bin/openvegas.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/openvegas.js --_install"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jar0ch0/OpenVegasDeployed"
   },
   "license": "MIT"
 }
