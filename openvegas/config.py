@@ -23,6 +23,9 @@ LEGACY_LOCAL_BACKEND_URLS = {
     "http://localhost:8000",
     "http://0.0.0.0:8000",
 }
+LEGACY_PRODUCTION_BACKEND_URLS = {
+    "https://openvegasdeployed-production.up.railway.app",
+}
 DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", FALLBACK_DEFAULT_BACKEND_URL)
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
@@ -66,7 +69,11 @@ def _current_default_backend_url() -> str:
 
 def _should_migrate_backend_url(url: object) -> bool:
     normalized = _normalize_backend_url(url)
-    return normalized in {LEGACY_DEFAULT_BACKEND_URL, *LEGACY_LOCAL_BACKEND_URLS}
+    return normalized in {
+        LEGACY_DEFAULT_BACKEND_URL,
+        *LEGACY_LOCAL_BACKEND_URLS,
+        *LEGACY_PRODUCTION_BACKEND_URLS,
+    }
 
 
 def _persist_migrated_config(config: dict) -> None:
