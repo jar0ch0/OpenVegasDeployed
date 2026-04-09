@@ -120,19 +120,6 @@ class _FileUploadServiceStub:
         return list(self.rows)
 
 
-class _DbNoProviderRows:
-    async def fetchrow(self, *_args, **_kwargs):
-        return None
-
-
-class _WalletUnused:
-    pass
-
-
-class _CatalogUnused:
-    pass
-
-
 def _parse_sse(response_text: str) -> list[tuple[str, dict]]:
     blocks = [b for b in str(response_text or "").split("\n\n") if b.strip()]
     out: list[tuple[str, dict]] = []
@@ -180,19 +167,6 @@ def test_inference_provider_unavailable_contract(monkeypatch):
     assert response.json()["user_pref_mode"] == "wrapper"
     assert response.json()["effective_mode"] == "wrapper"
     assert "effective_reason" in response.json()
-
-
-def test_gateway_provider_resolution_falls_back_to_env_in_production(monkeypatch):
-    from openvegas.gateway.inference import AIGateway
-
-    monkeypatch.setenv("OPENVEGAS_RUNTIME_ENV", "production")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
-    gateway = AIGateway(db=_DbNoProviderRows(), wallet=_WalletUnused(), catalog=_CatalogUnused())
-
-    import asyncio
-
-    key = asyncio.run(gateway._resolve_provider_api_key("openai"))
-    assert key == "sk-test-openai"
 
 
 def test_inference_insufficient_balance_contract(monkeypatch):

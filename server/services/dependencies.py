@@ -144,18 +144,22 @@ _redis: Any = _Placeholder()
 _log = logging.getLogger(__name__)
 
 
+def _env_enabled(name: str, default: str = "0") -> bool:
+    raw = str(os.getenv(name, default) or "").strip().strip('"').strip("'").lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 @lru_cache(maxsize=1)
 def current_flags() -> FeatureFlags:
-    env = os.getenv
     return FeatureFlags(
-        store_enabled=env("STORE_ENABLED", "1") == "1",
-        inference_enabled=env("INFERENCE_ENABLED", "1") == "1",
-        agent_runtime_enabled=env("AGENT_RUNTIME_ENABLED", "1") == "1",
-        human_casino_enabled=env("CASINO_HUMAN_ENABLED", "0") == "1",
-        mint_audit_enabled=env("MINT_AUDIT_ENABLED", "1") == "1",
-        context_enabled=env("OPENVEGAS_CONTEXT_ENABLED", "0") == "1",
-        trusted_proxy_headers_enabled=env("OPENVEGAS_TRUSTED_PROXY_HEADERS", "0") == "1",
-        files_enabled=env("OPENVEGAS_ENABLE_FILES", "0") == "1",
+        store_enabled=_env_enabled("STORE_ENABLED", "1"),
+        inference_enabled=_env_enabled("INFERENCE_ENABLED", "1"),
+        agent_runtime_enabled=_env_enabled("AGENT_RUNTIME_ENABLED", "1"),
+        human_casino_enabled=_env_enabled("CASINO_HUMAN_ENABLED", "0"),
+        mint_audit_enabled=_env_enabled("MINT_AUDIT_ENABLED", "1"),
+        context_enabled=_env_enabled("OPENVEGAS_CONTEXT_ENABLED", "0"),
+        trusted_proxy_headers_enabled=_env_enabled("OPENVEGAS_TRUSTED_PROXY_HEADERS", "0"),
+        files_enabled=_env_enabled("OPENVEGAS_ENABLE_FILES", "0"),
     )
 
 
@@ -236,7 +240,6 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "033_avatar_preferences")
     await require_migration_min(db, "036_profile_theme_preferences")
     await require_migration_min(db, "037_chat_file_uploads")
-    await require_migration_min(db, "038_provider_credential_alias_defaults")
 
     await require_tables(
         db,

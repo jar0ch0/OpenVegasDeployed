@@ -8,6 +8,7 @@
 # Local tool state
 .history/
 .claude/
+.codex
 
 # Python caches / build artifacts
 __pycache__/
@@ -58,6 +59,7 @@ pnpm-debug.log*
 *.tsbuildinfo
 .next/
 .cache/
+npm-cli/*.tgz
 
 # Remotion rendered outputs
 my-video/out/

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import hashlib
 import time
@@ -1074,6 +1075,58 @@ class AIGateway:
             },
         }
 
+    async def transcribe_audio(
+        self,
+        *,
+        provider: str,
+        model: str,
+        filename: str,
+        mime_type: str,
+        audio_bytes: bytes,
+        language: str | None = None,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        if str(provider or "").strip().lower() != "openai":
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Speech-to-text currently supports openai only.")
+        if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Audio payload is empty.")
+
+        api_key = await self._resolve_provider_api_key("openai")
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=api_key)
+        started = time.perf_counter()
+        file_obj = io.BytesIO(bytes(audio_bytes))
+        file_obj.name = str(filename or "audio.wav")
+        kwargs: dict[str, Any] = {}
+        if str(language or "").strip():
+            kwargs["language"] = str(language).strip()
+        if str(prompt or "").strip():
+            kwargs["prompt"] = str(prompt).strip()
+        resp = await client.audio.transcriptions.create(
+            model=str(model or "gpt-4o-mini-transcribe"),
+            file=file_obj,
+            **kwargs,
+        )
+        latency_ms = float((time.perf_counter() - started) * 1000.0)
+        text = str(getattr(resp, "text", "") or "").strip()
+        if not text and isinstance(resp, dict):
+            text = str(resp.get("text") or "").strip()
+        if not text:
+            raise ContractError(APIErrorCode.PROVIDER_UNAVAILABLE, "Speech transcription returned empty text.")
+
+        return {
+            "provider": "openai",
+            "model": str(model or "gpt-4o-mini-transcribe"),
+            "filename": str(filename or ""),
+            "mime_type": str(mime_type or "application/octet-stream"),
+            "text": text,
+            "diagnostics": {
+                "latency_ms": latency_ms,
+                "input_bytes": int(len(audio_bytes)),
+            },
+        }
+
     async def create_realtime_session(
         self,
         *,
@@ -1109,11 +1162,6 @@ class AIGateway:
     async def _resolve_provider_api_key(self, provider: str) -> str:
         """Resolve provider credentials with registry-first precedence."""
         runtime_env = os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local")).strip() or "local"
-        canonical_env_name = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-        }.get(provider, "")
         row = None
         try:
             row = await self.db.fetchrow(
@@ -1135,14 +1183,21 @@ class AIGateway:
         if row:
             key_alias = str(row["key_alias"]).strip()
             key = os.getenv(key_alias, "").strip()
-            if not key and canonical_env_name and key_alias != canonical_env_name:
-                key = os.getenv(canonical_env_name, "").strip()
             if key:
                 return key
+            raise ContractError(
+                APIErrorCode.PROVIDER_UNAVAILABLE,
+                f"No active provider credentials configured for {provider}.",
+            )
 
         allow_env_fallback = runtime_env.lower() in {"local", "dev", "development", "test"}
-        if allow_env_fallback or canonical_env_name:
-            key = os.getenv(canonical_env_name, "").strip()
+        if allow_env_fallback:
+            env_name = {
+                "openai": "OPENAI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+                "gemini": "GEMINI_API_KEY",
+            }.get(provider, "")
+            key = os.getenv(env_name, "").strip()
             if key:
                 return key
 
