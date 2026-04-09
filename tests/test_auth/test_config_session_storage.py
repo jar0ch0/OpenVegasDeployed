@@ -76,3 +76,23 @@ def test_force_config_storage_override_used_in_headless_ci(monkeypatch: pytest.M
     sess = cfg.get_session()
     assert sess["refresh_storage"] == "config"
     assert sess["refresh_token"] == "r2"
+
+
+def test_load_config_migrates_stale_localhost_backend_url(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"http://127.0.0.1:8000"}', encoding="utf-8")
+
+    loaded = cfg.load_config()
+
+    assert loaded["backend_url"] == "https://app.openvegas.ai"
+    persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
+    assert '"backend_url": "https://app.openvegas.ai"' in persisted
+
+
+def test_get_backend_url_prefers_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://old.example.com"}', encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_BACKEND_URL", "https://app.openvegas.ai/")
+
+    assert cfg.get_backend_url() == "https://app.openvegas.ai"

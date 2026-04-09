@@ -36,6 +36,8 @@ pyinstaller \
   --name "$BINARY_NAME" \
   --collect-all textual \
   --collect-all rich \
+  --collect-all numpy \
+  --collect-all sounddevice \
   --collect-all openai \
   --collect-all anthropic \
   --collect-all google.generativeai \
@@ -53,6 +55,8 @@ pyinstaller \
   --hidden-import stripe \
   --hidden-import redis \
   --hidden-import celery \
+  --hidden-import numpy \
+  --hidden-import sounddevice \
   --hidden-import PIL \
   --hidden-import PIL.Image \
   --hidden-import qrcode \

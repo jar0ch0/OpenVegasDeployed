@@ -170,7 +170,7 @@ Typical release flow:
 3. Optionally run:
    `bash scripts/sync-version.sh`
 4. Commit the release.
-5. Create and push a tag such as `v0.3.0`.
+5. Create and push a tag such as `v0.3.1`.
 
 When the tag is pushed, GitHub Actions:
 
@@ -184,7 +184,7 @@ npm publishing is handled by [`.github/workflows/npm-publish.yml`](./.github/wor
 The workflow supports both:
 
 - automatic publish on future GitHub Releases
-- manual `workflow_dispatch` for already-cut tags such as `v0.3.0`
+- manual `workflow_dispatch` for already-cut tags such as `v0.3.1`
 
 One-time npm setup:
 

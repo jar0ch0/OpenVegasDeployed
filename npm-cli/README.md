@@ -33,7 +33,7 @@ openvegas --upgrade
 
 ## Releases
 
-This package is version-matched with the GitHub Release tag. For example, npm package version `0.3.0` expects binary assets under GitHub tag `v0.3.0`.
+This package is version-matched with the GitHub Release tag. For example, npm package version `0.3.1` expects binary assets under GitHub tag `v0.3.1`.
 
 Project repo:
 
