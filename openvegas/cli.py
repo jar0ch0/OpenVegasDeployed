@@ -8571,7 +8571,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 f"[green]Voice captured: transcript ready in input ({int(insert_observed.get('chars') or 0)} chars).[/green]"
                             )
                         elif not voice_button.last_error:
-                            console.print("[yellow]Voice error: empty transcript returned.[/yellow]")
+                            console.print("[yellow]No speech detected. Try again.[/yellow]")
                     continue
                 if cmd == "/mcp":
                     if len(parts) < 2:

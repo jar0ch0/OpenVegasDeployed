@@ -1112,8 +1112,6 @@ class AIGateway:
         text = str(getattr(resp, "text", "") or "").strip()
         if not text and isinstance(resp, dict):
             text = str(resp.get("text") or "").strip()
-        if not text:
-            raise ContractError(APIErrorCode.PROVIDER_UNAVAILABLE, "Speech transcription returned empty text.")
 
         return {
             "provider": "openai",
@@ -1124,6 +1122,7 @@ class AIGateway:
             "diagnostics": {
                 "latency_ms": latency_ms,
                 "input_bytes": int(len(audio_bytes)),
+                "empty_text": not bool(text),
             },
         }
 
