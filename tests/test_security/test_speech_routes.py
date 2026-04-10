@@ -90,3 +90,38 @@ def test_speech_transcribe_feature_disabled(monkeypatch):
     assert resp.status_code == 503
     assert resp.json()["error"] == "feature_disabled"
 
+
+def test_speech_transcribe_gateway_failure_logs_context(monkeypatch):
+    class _FailingGateway:
+        async def transcribe_audio(self, **kwargs):
+            raise RuntimeError("upstream boom")
+
+    logged: dict[str, object] = {}
+
+    class _Logger:
+        def exception(self, message, *args):
+            logged["message"] = message
+            logged["args"] = args
+
+    monkeypatch.setattr(speech_routes, "_speech_enabled", lambda: True)
+    monkeypatch.setattr(speech_routes, "resolve_capability", lambda *a, **k: True)
+    monkeypatch.setattr(speech_routes, "get_file_upload_service", lambda: _StubFileService())
+    monkeypatch.setattr(speech_routes, "get_gateway", lambda: _FailingGateway())
+    monkeypatch.setattr(speech_routes, "logger", _Logger())
+    client = TestClient(_app_with_router())
+
+    resp = client.post("/speech/transcribe", json={"file_id": "file-1"})
+
+    assert resp.status_code == 502
+    assert resp.json()["error"] == "speech_transcription_failed"
+    assert logged["message"] == (
+        "speech_transcribe_failed user_id=%s file_id=%s provider=%s model=%s mime_type=%s filename=%s"
+    )
+    assert logged["args"] == (
+        "u-1",
+        "file-1",
+        "openai",
+        "gpt-4o-mini-transcribe",
+        "audio/m4a",
+        "voice-note.m4a",
+    )

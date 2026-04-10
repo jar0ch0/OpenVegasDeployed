@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +16,7 @@ from server.services.dependencies import get_file_upload_service, get_gateway
 from server.services.file_uploads import FileUploadError
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class SpeechTranscribeRequest(BaseModel):
@@ -83,6 +86,15 @@ async def speech_transcribe(req: SpeechTranscribeRequest, user: dict = Depends(g
         )
     except Exception as exc:
         emit_metric("speech_transcribe_total", {"outcome": "failure", "reason": "gateway_error"})
+        logger.exception(
+            "speech_transcribe_failed user_id=%s file_id=%s provider=%s model=%s mime_type=%s filename=%s",
+            uid,
+            str(req.file_id or ""),
+            str(req.provider or "openai"),
+            str(req.model or "gpt-4o-mini-transcribe"),
+            mime_type,
+            str(item.get("filename") or ""),
+        )
         return JSONResponse(status_code=502, content={"error": "speech_transcription_failed", "detail": str(exc)})
 
     transcript_text = str((result.get("text") if isinstance(result, dict) else result) or "").strip()
@@ -104,4 +116,3 @@ async def speech_transcribe(req: SpeechTranscribeRequest, user: dict = Depends(g
         "mime_type": mime_type,
         **(result if isinstance(result, dict) else {"text": str(result or "")}),
     }
-
