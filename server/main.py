@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from dotenv import load_dotenv, dotenv_values
@@ -82,6 +83,7 @@ from server.services.dependencies import (
     assert_db_ready,
     assert_redis_ready,
     assert_schema_compatible,
+    bind_http_client,
     close_runtime_deps,
     current_flags,
     get_db,
@@ -138,7 +140,14 @@ load_dotenv(ROOT_DIR / ".env", override=_dotenv_override_enabled())
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
+    http_client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=None,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+    )
+    app.state.http_client = http_client
+    bind_http_client(http_client)
     await init_runtime_deps()
     try:
         flags = current_flags()
@@ -157,11 +166,13 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        bind_http_client(None)
         await close_runtime_deps()
+        await http_client.aclose()
 
 app = FastAPI(
     title="OpenVegas API",
-    version="0.3.6",
+    version="0.3.7",
     description="Terminal Arcade for Developers",
     lifespan=lifespan,
 )

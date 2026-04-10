@@ -91,6 +91,42 @@ def test_speech_transcribe_empty_text_returns_success(monkeypatch):
     assert any(k.startswith("speech_transcribe_text_len_total|bucket=0") for k in snap)
 
 
+def test_speech_transcribe_inline_audio_success(monkeypatch):
+    class _InlineGateway:
+        async def transcribe_audio(self, **kwargs):
+            assert kwargs["filename"] == "voice-note.wav"
+            assert kwargs["mime_type"] == "audio/wav"
+            assert kwargs["audio_bytes"] == b"\x00\x01\x02"
+            return {
+                "provider": "openai",
+                "model": "gpt-4o-mini-transcribe",
+                "filename": "voice-note.wav",
+                "mime_type": "audio/wav",
+                "text": "hello world",
+                "diagnostics": {"latency_ms": 8.0},
+            }
+
+    monkeypatch.setattr(speech_routes, "_speech_enabled", lambda: True)
+    monkeypatch.setattr(speech_routes, "resolve_capability", lambda *a, **k: True)
+    monkeypatch.setattr(speech_routes, "get_gateway", lambda: _InlineGateway())
+    client = TestClient(_app_with_router())
+
+    resp = client.post(
+        "/speech/transcribe",
+        json={
+            "content_base64": "AAEC",
+            "filename": "voice-note.wav",
+            "mime_type": "audio/wav",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["file_id"] == ""
+    assert body["filename"] == "voice-note.wav"
+    assert body["text"] == "hello world"
+
+
 def test_speech_transcribe_unsupported_mime(monkeypatch):
     class _NonAudioFileService(_StubFileService):
         async def resolve_uploaded_for_inference(self, *, user_id: str, file_ids: list[str]):
