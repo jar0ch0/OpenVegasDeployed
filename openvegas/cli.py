@@ -5883,8 +5883,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             )
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
             transcript = str((stt or {}).get("text") or "").strip()
-            if not transcript:
-                raise RuntimeError("speech-to-text returned empty transcript")
             return transcript
         except asyncio.TimeoutError:
             if phase in {"upload_init", "upload_complete"}:
