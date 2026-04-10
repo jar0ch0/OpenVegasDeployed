@@ -36,6 +36,7 @@ pyinstaller \
   --name "$BINARY_NAME" \
   --collect-all textual \
   --collect-all rich \
+  --collect-all keyring \
   --collect-all numpy \
   --collect-all sounddevice \
   --collect-all openai \
@@ -44,6 +45,7 @@ pyinstaller \
   --hidden-import click \
   --hidden-import httpx \
   --hidden-import httpx._transports.default \
+  --hidden-import keyring \
   --hidden-import supabase \
   --hidden-import gotrue \
   --hidden-import storage3 \

@@ -26,7 +26,12 @@ LEGACY_LOCAL_BACKEND_URLS = {
 LEGACY_PRODUCTION_BACKEND_URLS = {
     "https://openvegasdeployed-production.up.railway.app",
 }
-DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", FALLBACK_DEFAULT_BACKEND_URL)
+DEFAULT_BACKEND_URL = (
+    str(os.getenv("OPENVEGAS_BACKEND_URL", "")).strip()
+    or str(os.getenv("OPENVEGAS_API_BASE_URL", "")).strip()
+    or str(os.getenv("OPENVEGAS_API_URL", "")).strip()
+    or FALLBACK_DEFAULT_BACKEND_URL
+)
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
 _PLATFORM_STORE_ACCOUNT = "refresh_token"
@@ -62,8 +67,16 @@ def _normalize_backend_url(url: object) -> str:
     return str(url or "").strip().rstrip("/")
 
 
+def _environment_backend_url() -> str:
+    return (
+        _normalize_backend_url(os.getenv("OPENVEGAS_BACKEND_URL", ""))
+        or _normalize_backend_url(os.getenv("OPENVEGAS_API_BASE_URL", ""))
+        or _normalize_backend_url(os.getenv("OPENVEGAS_API_URL", ""))
+    )
+
+
 def _current_default_backend_url() -> str:
-    value = _normalize_backend_url(os.getenv("OPENVEGAS_BACKEND_URL", FALLBACK_DEFAULT_BACKEND_URL))
+    value = _environment_backend_url()
     return value or FALLBACK_DEFAULT_BACKEND_URL
 
 
@@ -203,7 +216,8 @@ def platform_keychain_available() -> bool:
 
 
 def touchid_enabled() -> bool:
-    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    default = "1" if sys.platform == "darwin" else "0"
+    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def touchid_supported() -> bool:
@@ -490,7 +504,7 @@ def token_expires_soon(session: dict | None = None, leeway_sec: int = 300) -> bo
 
 
 def get_backend_url() -> str:
-    env_override = _normalize_backend_url(os.getenv("OPENVEGAS_BACKEND_URL", ""))
+    env_override = _environment_backend_url()
     if env_override:
         return env_override
     config = load_config()

@@ -111,3 +111,27 @@ def test_get_backend_url_prefers_env_override(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setenv("OPENVEGAS_BACKEND_URL", "https://app.openvegas.ai/")
 
     assert cfg.get_backend_url() == "https://app.openvegas.ai"
+
+
+def test_get_backend_url_falls_back_to_api_base_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    monkeypatch.delenv("OPENVEGAS_API_URL", raising=False)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://old.example.com"}', encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_API_BASE_URL", "https://api-base.example.com/")
+
+    assert cfg.get_backend_url() == "https://api-base.example.com"
+
+
+def test_load_config_migrates_legacy_backend_url_to_api_alias_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    monkeypatch.delenv("OPENVEGAS_API_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENVEGAS_API_URL", "https://alias-api.example.com/")
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://api.openvegas.gg"}', encoding="utf-8")
+
+    loaded = cfg.load_config()
+
+    assert loaded["backend_url"] == "https://alias-api.example.com"
+    persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
+    assert '"backend_url": "https://alias-api.example.com"' in persisted
