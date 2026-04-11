@@ -8108,6 +8108,92 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     fullscreen_handoff_message: str | None = None
 
+    async def _sync_chat_preferences() -> None:
+        nonlocal conversation_mode, current_model
+        mode_task: asyncio.Task[dict] | None = None
+        models_task: asyncio.Task[dict] | None = None
+        get_mode_fn = getattr(client, "get_mode", None)
+        if callable(get_mode_fn):
+            mode_task = asyncio.create_task(get_mode_fn())
+        list_models_fn = getattr(client, "list_models", None)
+        if current_provider == "openai" and callable(list_models_fn):
+            models_task = asyncio.create_task(list_models_fn("openai"))
+
+        if mode_task is None:
+            conversation_mode = conversation_mode or "persistent"
+        else:
+            try:
+                mode = await mode_task
+                conversation_mode = str(mode.get("conversation_mode", conversation_mode or "persistent"))
+            except Exception:
+                conversation_mode = conversation_mode or "persistent"
+
+        if models_task is None:
+            return
+        try:
+            models_resp = await models_task
+            enabled_models = [
+                str(m.get("model_id", "")).strip()
+                for m in models_resp.get("models", [])
+                if m.get("enabled")
+            ]
+            selected = _pick_preferred_model(enabled_models, current_model)
+            if selected and selected != current_model:
+                current_model = selected
+        except Exception:
+            pass
+
+    async def _create_and_register_runtime_run() -> bool:
+        nonlocal current_run_id, current_run_version, current_signature
+        try:
+            run_info = await client.agent_run_create(state="running", is_resumable=True)
+            run_id = str(run_info.get("run_id", "") or "")
+            if not run_id:
+                current_run_id = None
+                current_run_version = 0
+                current_signature = "sha256:"
+                return False
+            current_run_id = run_id
+            current_run_version = int(run_info.get("run_version", 0))
+            current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
+            await client.agent_register_workspace(
+                run_id=current_run_id,
+                runtime_session_id=runtime_session_id,
+                workspace_root=workspace_root,
+                workspace_fingerprint=workspace_fp,
+                git_root=workspace_git_root,
+            )
+            return True
+        except Exception:
+            current_run_id = None
+            current_run_version = 0
+            current_signature = "sha256:"
+            return False
+
+    async def _ensure_runtime_run(*, wait: bool) -> bool:
+        nonlocal runtime_run_task
+        if current_run_id:
+            return True
+        if runtime_run_task is None or runtime_run_task.done():
+            runtime_run_task = asyncio.create_task(_create_and_register_runtime_run())
+        if not wait:
+            return False
+        try:
+            return bool(await runtime_run_task)
+        except Exception:
+            return False
+
+    async def _bootstrap_chat_session() -> None:
+        await asyncio.gather(
+            _sync_chat_preferences(),
+            _ensure_runtime_run(wait=True),
+        )
+
+    def _start_chat_bootstrap() -> None:
+        nonlocal startup_bootstrap_task
+        if startup_bootstrap_task is None or startup_bootstrap_task.done():
+            startup_bootstrap_task = asyncio.create_task(_bootstrap_chat_session())
+
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
         nonlocal current_run_id, current_run_version, current_signature
@@ -8149,85 +8235,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             )
             delta = abs(next_usd - prev_usd)
             return crossed_floor or delta >= Decimal("0.50")
-
-        async def _sync_chat_preferences() -> None:
-            nonlocal conversation_mode, current_model
-            mode_task = asyncio.create_task(client.get_mode())
-            models_task: asyncio.Task[dict] | None = None
-            if current_provider == "openai":
-                models_task = asyncio.create_task(client.list_models("openai"))
-
-            try:
-                mode = await mode_task
-                conversation_mode = str(mode.get("conversation_mode", conversation_mode or "persistent"))
-            except Exception:
-                conversation_mode = conversation_mode or "persistent"
-
-            if models_task is None:
-                return
-            try:
-                models_resp = await models_task
-                enabled_models = [
-                    str(m.get("model_id", "")).strip()
-                    for m in models_resp.get("models", [])
-                    if m.get("enabled")
-                ]
-                selected = _pick_preferred_model(enabled_models, current_model)
-                if selected and selected != current_model:
-                    current_model = selected
-            except Exception:
-                pass
-
-        async def _create_and_register_runtime_run() -> bool:
-            nonlocal current_run_id, current_run_version, current_signature
-            try:
-                run_info = await client.agent_run_create(state="running", is_resumable=True)
-                run_id = str(run_info.get("run_id", "") or "")
-                if not run_id:
-                    current_run_id = None
-                    current_run_version = 0
-                    current_signature = "sha256:"
-                    return False
-                current_run_id = run_id
-                current_run_version = int(run_info.get("run_version", 0))
-                current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
-                await client.agent_register_workspace(
-                    run_id=current_run_id,
-                    runtime_session_id=runtime_session_id,
-                    workspace_root=workspace_root,
-                    workspace_fingerprint=workspace_fp,
-                    git_root=workspace_git_root,
-                )
-                return True
-            except Exception:
-                current_run_id = None
-                current_run_version = 0
-                current_signature = "sha256:"
-                return False
-
-        async def _ensure_runtime_run(*, wait: bool) -> bool:
-            nonlocal runtime_run_task
-            if current_run_id:
-                return True
-            if runtime_run_task is None or runtime_run_task.done():
-                runtime_run_task = asyncio.create_task(_create_and_register_runtime_run())
-            if not wait:
-                return False
-            try:
-                return bool(await runtime_run_task)
-            except Exception:
-                return False
-
-        async def _bootstrap_chat_session() -> None:
-            await asyncio.gather(
-                _sync_chat_preferences(),
-                _ensure_runtime_run(wait=True),
-            )
-
-        def _start_chat_bootstrap() -> None:
-            nonlocal startup_bootstrap_task
-            if startup_bootstrap_task is None or startup_bootstrap_task.done():
-                startup_bootstrap_task = asyncio.create_task(_bootstrap_chat_session())
 
         async def _maybe_render_low_balance_hint(*, force: bool = False) -> None:
             nonlocal last_seen_balance_usd, shown_topup_id, shown_topup_status, shown_at_monotonic
@@ -8278,6 +8285,20 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 return
             low_balance_hint_task = asyncio.create_task(_maybe_render_low_balance_hint(force=False))
             await asyncio.sleep(0)
+
+        async def _cleanup_chat_background_tasks() -> None:
+            nonlocal low_balance_hint_task, startup_bootstrap_task, runtime_run_task
+            to_cancel: list[asyncio.Task[Any]] = []
+            for task in (low_balance_hint_task, startup_bootstrap_task, runtime_run_task):
+                if task is None or task.done():
+                    continue
+                task.cancel()
+                to_cancel.append(task)
+            low_balance_hint_task = None
+            startup_bootstrap_task = None
+            runtime_run_task = None
+            if to_cancel:
+                await asyncio.gather(*to_cancel, return_exceptions=True)
 
         async def _read_chat_message() -> str:
             nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings, pending_voice_prefill, pending_voice_meta, prompt_input_active
@@ -8566,6 +8587,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                 if cmd == "/exit":
                     voice_button.stop_if_recording()
+                    await _cleanup_chat_background_tasks()
                     console.print("[dim]Exiting chat.[/dim]")
                     return "exit"
                 if cmd == "/help":
@@ -9003,6 +9025,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 )
                                 continue
                     voice_button.stop_if_recording()
+                    await _cleanup_chat_background_tasks()
                     return "ui"
 
                 console.print("[red]Unknown slash command. Use /help.[/red]")
