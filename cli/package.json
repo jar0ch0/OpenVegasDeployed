@@ -1,0 +1,24 @@
+{
+  "name": "openvegas-cli",
+  "version": "0.4.0",
+  "description": "OpenVegas terminal interface — cyberpunk arcade AI client",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.tsx",
+    "build": "bun run build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "immer": "^10.0.3",
+    "ink": "^4.4.1",
+    "ink-gradient": "^3.0.0",
+    "react": "^18.2.0",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "typescript": "^5.4.0"
+  }
+}

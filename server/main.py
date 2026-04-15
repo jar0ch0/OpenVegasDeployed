@@ -79,6 +79,9 @@ from server.routes import image_gen as image_gen_routes
 from server.routes import realtime as realtime_routes
 from server.routes import speech as speech_routes
 from server.routes import ops_diagnostics as ops_diagnostics_routes
+from server.routes import cli_auth as cli_auth_routes
+from server.routes import terminal as terminal_routes
+from server.routes import web3_payments as web3_payment_routes
 from server.services.dependencies import (
     assert_db_ready,
     assert_redis_ready,
@@ -288,6 +291,9 @@ app.include_router(image_gen_routes.router, tags=["image-gen"])
 app.include_router(realtime_routes.router, tags=["realtime"])
 app.include_router(speech_routes.router, tags=["speech"])
 app.include_router(ops_diagnostics_routes.router, tags=["ops"])
+app.include_router(cli_auth_routes.router,      tags=["cli-auth"])
+app.include_router(terminal_routes.router,      tags=["terminal"])
+app.include_router(web3_payment_routes.router,  tags=["web3-payments"])
 
 
 @app.get("/")
