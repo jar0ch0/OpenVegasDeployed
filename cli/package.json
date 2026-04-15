@@ -1,6 +1,6 @@
 {
   "name": "openvegas-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "OpenVegas terminal interface — cyberpunk arcade AI client",
   "type": "module",
   "scripts": {
