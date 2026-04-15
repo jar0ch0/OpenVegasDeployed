@@ -108,6 +108,20 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+/**
+ * Escape HTML special characters before inserting into an HTML page.
+ * The ?error= query parameter arrives from a 302 redirect and must be
+ * sanitised to prevent reflected XSS in the local callback page.
+ */
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g,  '&amp;')
+    .replace(/</g,  '&lt;')
+    .replace(/>/g,  '&gt;')
+    .replace(/"/g,  '&quot;')
+    .replace(/'/g,  '&#x27;');
+}
+
 const ERROR_HTML = (msg: string) => `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -124,7 +138,7 @@ const ERROR_HTML = (msg: string) => `<!DOCTYPE html>
 <body>
   <div>
     <h1>&#9632; Auth Failed</h1>
-    <p>${msg}</p>
+    <p>${escapeHtml(msg)}</p>
     <p>Please retry: <code>openvegas login</code></p>
   </div>
 </body>

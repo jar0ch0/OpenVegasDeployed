@@ -154,33 +154,42 @@ async def cli_token_exchange(payload: CliExchangeRequest, request: Request):
 
 @router.get("/ui/auth/cli/callback")
 async def cli_direct_callback(
-    access_token: str = "",
+    access_token:  str = "",
     refresh_token: str = "",
-    expires_at: int = 0,
-    state: str = "",
-    error: str = "",
-    request: Request = None,  # type: ignore[assignment]
+    expires_at:    int = 0,
+    state:         str = "",   # REQUIRED — absence was previously allowed, bypassing CSRF
+    error:         str = "",
+    request:       Request = None,  # type: ignore[assignment]
 ):
     """
     Direct GET redirect from Supabase (used when redirect_to points here).
     Less common — most flows use the JS exchange route above.
+
+    SECURITY: state is always validated.  The old "if state:" guard allowed
+    callers to omit the parameter entirely, bypassing CSRF protection.  Now
+    a missing or short state always returns 400.
     """
     if error:
+        # Forward error to CLI; state is included so the local server can
+        # still verify the nonce before rendering the error page.
         params = urlencode({"error": error, "state": state})
         return RedirectResponse(url=f"{CLI_CALLBACK_HOST}/callback?{params}", status_code=302)
 
     if not access_token or not refresh_token:
         raise HTTPException(400, "Missing token in callback")
 
-    if state:
-        redis = get_redis()
-        nonce_key = REDIS_NONCE_PREFIX + hashlib.sha256(state.encode()).hexdigest()
-        stored = await redis.getdel(nonce_key)
-        if not stored:
-            raise HTTPException(400, "State expired or already used")
+    # State nonce is always required — never conditional
+    if not state or len(state) < 16:
+        raise HTTPException(400, "Missing or invalid state parameter")
+
+    redis     = get_redis()
+    nonce_key = REDIS_NONCE_PREFIX + hashlib.sha256(state.encode()).hexdigest()
+    stored    = await redis.getdel(nonce_key)
+    if not stored:
+        raise HTTPException(400, "State expired or already used. Run `openvegas login` again.")
 
     user = await _validate_supabase_token(access_token)
-    ts = expires_at or (int(time.time()) + 3600)
+    ts   = expires_at or (int(time.time()) + 3600)
 
     callback_params = urlencode({
         "token":      access_token,

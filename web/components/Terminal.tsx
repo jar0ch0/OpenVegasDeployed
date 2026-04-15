@@ -227,6 +227,11 @@ export function Terminal({
   }, []);
 
   // ── Resize observer → fit + sendResize ────────────────────────────────────
+  // The empty dependency array is intentional: we want exactly one observer
+  // for the lifetime of the component.  The previous code had no array, which
+  // caused a new ResizeObserver to be created after every render — during
+  // high-frequency xterm output (60fps Pachinko frames) this stacked dozens
+  // of live observers, each firing on the next resize event.
   useEffect(() => {
     if (!containerRef.current) return;
     const ro = new ResizeObserver(() => {
@@ -236,7 +241,7 @@ export function Terminal({
     });
     ro.observe(containerRef.current);
     return () => ro.disconnect();
-  });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSessionInfo = useCallback((info: SessionInfo) => {
     setSessionInfo(info);

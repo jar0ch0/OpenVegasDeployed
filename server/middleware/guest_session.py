@@ -62,35 +62,82 @@ class GuestSession:
 
     async def drain(self, redis: Any, cost_v: float) -> float:
         """
-        Atomically debit cost_v from the session balance.
-        Returns the new remaining balance (may be 0 if exhausted).
-        Guest sessions drain from Redis; authenticated sessions skip this.
+        Atomically debit cost_v from ALL THREE balance keys:
+          - per-session key  (guest:balance:session:{id})
+          - per-IP key       (guest:balance:ip:{hash})
+          - per-fingerprint key (guest:balance:fp:{hash}, if present)
+
+        All three are decremented to the same new floor so that reconnecting
+        a WebSocket does not grant a fresh 50 $V — the axis keys reflect the
+        true remaining budget and are re-read at each new session creation.
+
+        Returns the new effective remaining balance (may be 0 if exhausted).
+        Authenticated sessions skip this path entirely.
         """
         if not self.is_guest or cost_v <= 0:
             return self.balance_v
 
-        # We use a Lua script for atomic read-decrement-floor-at-zero
+        # Three-key atomic Lua drain.
+        # KEYS: [session_key, ip_key, fp_key_or_empty_string]
+        # ARGV: [cost_v_as_string]
         lua_script = """
-local key = KEYS[1]
-local cost = tonumber(ARGV[1])
-local cur  = tonumber(redis.call('GET', key) or '0')
-if cur <= 0 then return 0 end
-local next = math.max(0, cur - cost)
-redis.call('SET', key, tostring(next), 'KEEPTTL')
-return next
+local session_key = KEYS[1]
+local ip_key      = KEYS[2]
+local fp_key      = KEYS[3]
+local cost        = tonumber(ARGV[1])
+
+-- Read all three current balances (default to 0 when key is absent)
+local cur_s = tonumber(redis.call('GET', session_key) or '0')
+local cur_i = tonumber(redis.call('GET', ip_key)      or '0')
+-- fp_key may be an empty string (no fingerprint provided) — skip in that case
+local cur_f = cur_i
+if fp_key ~= '' then
+    cur_f = tonumber(redis.call('GET', fp_key) or '0')
+end
+
+-- Enforce the minimum across all three axes
+local effective = math.min(cur_s, cur_i, cur_f)
+if effective <= 0 then return 0 end
+
+local next_val = math.max(0, effective - cost)
+
+-- Write the same new value to all three keys, preserving their existing TTLs
+redis.call('SET', session_key, tostring(next_val), 'KEEPTTL')
+redis.call('SET', ip_key,      tostring(next_val), 'KEEPTTL')
+if fp_key ~= '' then
+    redis.call('SET', fp_key,  tostring(next_val), 'KEEPTTL')
+end
+
+return next_val
 """
         try:
-            result = await redis.eval(lua_script, 1, self._balance_key, str(cost_v))
+            result = await redis.eval(
+                lua_script,
+                3,                         # number of KEYS
+                self._session_balance_key,
+                self._ip_balance_key,
+                self._fp_balance_key or "",
+                str(cost_v),               # ARGV[1]
+            )
             self.balance_v = float(result or 0)
         except Exception:
-            # Redis unavailable — allow session to continue (fail open)
-            self.balance_v = max(0.0, self.balance_v - cost_v)
+            # Redis unavailable — fail closed: refuse spend rather than allow free usage
+            self.balance_v = 0.0
 
         return self.balance_v
 
     @property
-    def _balance_key(self) -> str:
+    def _session_balance_key(self) -> str:
         return f"{REDIS_KEY_PREFIX}:balance:session:{self.session_id}"
+
+    # These are set by resolve_terminal_session after the session object is created
+    _ip_balance_key: str = ""
+    _fp_balance_key: str = ""
+
+    # Keep the old property name as an alias so callers outside this file still work
+    @property
+    def _balance_key(self) -> str:
+        return self._session_balance_key
 
 
 # ─── Session resolution ───────────────────────────────────────────────────────
@@ -101,11 +148,19 @@ def _hash_key(value: str) -> str:
 
 
 def _extract_client_ip(ws: WebSocket) -> str:
-    """Extracts client IP, trusting Railway's X-Forwarded-For."""
+    """Extracts client IP from Railway's X-Forwarded-For header.
+
+    Railway's load balancer *appends* the real client IP as the rightmost
+    value.  Taking the leftmost value (the old behaviour) allows trivial
+    spoofing via a forged header.  We take the rightmost non-empty value
+    so that only Railway's append is trusted.
+    """
     forwarded = ws.headers.get("x-forwarded-for", "")
     if forwarded:
-        # Leftmost IP is the original client
-        return forwarded.split(",")[0].strip()
+        # Rightmost entry is appended by Railway's load balancer — trusted.
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return ws.client.host if ws.client else "unknown"
 
 
@@ -162,26 +217,33 @@ async def resolve_terminal_session(
     client_ip = _extract_client_ip(ws)
     fp        = (fingerprint or ws.query_params.get("fp", "")).strip()[:64]
 
-    # Take the minimum of IP-based and fingerprint-based balances
+    # Build the stable per-axis Redis key names (we need them both for
+    # initialization AND to pass into drain() so it can decrement all three)
+    ip_key = f"{REDIS_KEY_PREFIX}:balance:ip:{_hash_key(client_ip)}"
+    fp_key = f"{REDIS_KEY_PREFIX}:balance:fp:{_hash_key(fp)}" if fp else ""
+
     ip_balance = await _get_or_create_guest_balance(redis, "ip", client_ip)
-    fp_balance = ip_balance  # default to IP if no fingerprint
+    fp_balance = ip_balance  # default to IP axis when no fingerprint provided
 
     if fp:
         fp_balance = await _get_or_create_guest_balance(redis, "fp", fp)
 
-    # Enforce the stricter limit
+    # Enforce the stricter limit across both axes
     effective_balance = min(ip_balance, fp_balance)
 
-    # Create a per-connection balance key seeded from IP+fp minimum
-    session_id = f"guest-{_hash_key(client_ip + fp)}-{int(time.time())}"
-    balance_key = f"{REDIS_KEY_PREFIX}:balance:session:{session_id}"
-    await redis.set(balance_key, str(effective_balance), ex=GUEST_BALANCE_TTL)
+    # Per-connection key seeded from IP+fp so two simultaneous tabs share state
+    session_id  = f"guest-{_hash_key(client_ip + fp)}-{int(time.time())}"
+    session_key = f"{REDIS_KEY_PREFIX}:balance:session:{session_id}"
+    await redis.set(session_key, str(effective_balance), ex=GUEST_BALANCE_TTL)
 
     session = GuestSession(
         session_id=session_id,
         is_guest=True,
         balance_v=effective_balance,
     )
+    # Wire axis key names so drain() can decrement all three atomically
+    session._ip_balance_key = ip_key
+    session._fp_balance_key = fp_key
 
     if effective_balance <= 0:
         # Balance already exhausted — send SYSTEM_LOCK immediately

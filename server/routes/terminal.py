@@ -114,6 +114,16 @@ class PtyProcess:
             os.close(self.fd)
         except OSError:
             pass
+        # Reap the zombie.  os.fork() children become zombies (defunct entries
+        # in the process table) until the parent calls waitpid().  On a busy
+        # Railway instance with many WebSocket connections this accumulates into
+        # a resource leak.  WNOHANG lets us reap without blocking if the child
+        # hasn't exited yet — we've already sent SIGTERM so it will exit soon
+        # and the OS will clean it up at the next GC pass.
+        try:
+            os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
 
 
 def _spawn_pty(session_id: str, cols: int, rows: int) -> PtyProcess:
